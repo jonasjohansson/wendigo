@@ -88,11 +88,37 @@ class SyphonFrameReceiver {
         CVPixelBufferLockBaseAddress(pb, [])
         let dest = CVPixelBufferGetBaseAddress(pb)!
         let bytesPerRow = CVPixelBufferGetBytesPerRow(pb)
-        let region = MTLRegion(origin: MTLOrigin(), size: MTLSize(width: width, height: height, depth: 1))
-        texture.getBytes(dest, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
-        CVPixelBufferUnlockBaseAddress(pb, [])
 
-        onPixelBuffer?(pb)
+        // Use a staging buffer + blit encoder for pipelined GPU-to-CPU copy
+        let rowBytes = width * 4
+        let bufferLength = rowBytes * height
+        guard let stagingBuffer = device.makeBuffer(length: bufferLength, options: .storageModeShared),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            CVPixelBufferUnlockBaseAddress(pb, [])
+            return
+        }
+
+        let sourceSize = MTLSize(width: width, height: height, depth: 1)
+        blit.copy(from: texture, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(), sourceSize: sourceSize,
+                  to: stagingBuffer, destinationOffset: 0,
+                  destinationBytesPerRow: rowBytes, destinationBytesPerImage: bufferLength)
+        blit.endEncoding()
+
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            // Copy from staging buffer into CVPixelBuffer
+            let src = stagingBuffer.contents()
+            for row in 0..<height {
+                let dstRow = dest.advanced(by: row * bytesPerRow)
+                let srcRow = src.advanced(by: row * rowBytes)
+                memcpy(dstRow, srcRow, rowBytes)
+            }
+            CVPixelBufferUnlockBaseAddress(pb, [])
+            self?.onPixelBuffer?(pb)
+        }
+
+        commandBuffer.commit()
     }
 
     func disconnect() {

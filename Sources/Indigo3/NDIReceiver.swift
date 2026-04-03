@@ -1,5 +1,6 @@
 import Foundation
 import CoreVideo
+import os
 import CNDI
 
 struct NDISourceInfo: Identifiable, Hashable {
@@ -38,26 +39,35 @@ class NDIDiscovery {
 
 class NDIFrameReceiver {
     private var recvInstance: NDIlib_recv_instance_t?
-    private var isRunning = false
+    private let isRunning = OSAllocatedUnfairLock(initialState: false)
     private let receiveQueue = DispatchQueue(label: "indigo3.ndi.receive", qos: .userInteractive)
+
+    private var pixelBufferPool: CVPixelBufferPool?
+    private var poolWidth: Int = 0
+    private var poolHeight: Int = 0
 
     var onPixelBuffer: ((CVPixelBuffer) -> Void)?
 
     func connect(to source: NDISourceInfo) {
+        // Retain NSStrings so their utf8String pointers stay valid through NDI API calls
+        let sourceName = source.name as NSString
+        let recvName = "Indigo3" as NSString
+
         var ndiSource = NDIlib_source_t()
-        ndiSource.p_ndi_name = (source.name as NSString).utf8String
+        ndiSource.p_ndi_name = sourceName.utf8String
 
         var settings = NDIlib_recv_create_v3_t()
         settings.source_to_connect_to = ndiSource
         settings.color_format = NDIlib_recv_color_format_BGRX_BGRA
         settings.bandwidth = NDIlib_recv_bandwidth_highest
         settings.allow_video_fields = true
-        settings.p_ndi_recv_name = ("Indigo3" as NSString).utf8String
+        settings.p_ndi_recv_name = recvName.utf8String
 
         recvInstance = NDIlib_recv_create_v3(&settings)
+        _ = (sourceName, recvName)  // prevent premature release
         guard recvInstance != nil else { return }
 
-        isRunning = true
+        isRunning.withLock { $0 = true }
         receiveQueue.async { [weak self] in
             self?.receiveLoop()
         }
@@ -66,7 +76,7 @@ class NDIFrameReceiver {
     private func receiveLoop() {
         guard let recv = recvInstance else { return }
 
-        while isRunning {
+        while isRunning.withLock({ $0 }) {
             var videoFrame = NDIlib_video_frame_v2_t()
             var audioFrame = NDIlib_audio_frame_v2_t()
             var metadataFrame = NDIlib_metadata_frame_t()
@@ -80,15 +90,33 @@ class NDIFrameReceiver {
                     let height = Int(videoFrame.yres)
                     let stride = Int(videoFrame.line_stride_in_bytes)
 
+                    // Recreate pool if dimensions changed
+                    if width != self.poolWidth || height != self.poolHeight {
+                        let attrs: [String: Any] = [
+                            kCVPixelBufferWidthKey as String: width,
+                            kCVPixelBufferHeightKey as String: height,
+                            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                        ]
+                        CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &self.pixelBufferPool)
+                        self.poolWidth = width
+                        self.poolHeight = height
+                    }
+
+                    // Get a reusable pixel buffer from the pool
                     var pixelBuffer: CVPixelBuffer?
-                    CVPixelBufferCreateWithBytes(
-                        nil, width, height,
-                        kCVPixelFormatType_32BGRA,
-                        data, stride,
-                        nil, nil, nil,
-                        &pixelBuffer
-                    )
+                    if let pool = self.pixelBufferPool {
+                        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
+                    }
                     if let pb = pixelBuffer {
+                        CVPixelBufferLockBaseAddress(pb, [])
+                        let dest = CVPixelBufferGetBaseAddress(pb)!
+                        let destStride = CVPixelBufferGetBytesPerRow(pb)
+                        for row in 0..<height {
+                            memcpy(dest.advanced(by: row * destStride),
+                                   data.advanced(by: row * stride),
+                                   min(stride, destStride))
+                        }
+                        CVPixelBufferUnlockBaseAddress(pb, [])
                         onPixelBuffer?(pb)
                     }
                 }
@@ -107,7 +135,7 @@ class NDIFrameReceiver {
     }
 
     func disconnect() {
-        isRunning = false
+        isRunning.withLock { $0 = false }
         if let recv = recvInstance {
             NDIlib_recv_destroy(recv)
             recvInstance = nil

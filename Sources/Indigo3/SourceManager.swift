@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import CoreMedia
+import os
 
 enum AnySource: Hashable {
     case ndi(NDISourceInfo)
@@ -27,7 +28,6 @@ struct StreamMapping: Identifiable {
     var streamId: String
     var isActive: Bool
     var fps: Double = 0
-    var bitrate: Double = 0
 }
 
 class SourceManager: ObservableObject {
@@ -45,7 +45,7 @@ class SourceManager: ObservableObject {
     private var receivers: [String: Any] = [:]       // mapping.id -> receiver
     private var encoders: [String: StreamEncoder] = [:] // mapping.id -> encoder
     private var frameCounters: [String: Int] = [:]
-    private let counterLock = NSLock()
+    private var counterLock = os_unfair_lock()
     private var frameTimers: [String: Timer] = [:]
 
 
@@ -114,42 +114,39 @@ class SourceManager: ObservableObject {
         guard let idx = mappings.firstIndex(where: { $0.id == mapping.id }) else { return }
         let key = mapping.id.uuidString
 
-        // Create encoder
+        // Create encoder (session is lazily created on first frame to match input resolution)
         let encoder = StreamEncoder()
-        guard encoder.start() else {
-            print("Failed to start encoder for \(mapping.streamId)")
-            return
-        }
         encoder.onEncodedFrame = { [weak self] type, timestamp, data in
             self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
         }
         encoders[key] = encoder
 
         // Track FPS
-        counterLock.lock()
+        os_unfair_lock_lock(&counterLock)
         frameCounters[key] = 0
-        counterLock.unlock()
+        os_unfair_lock_unlock(&counterLock)
         frameTimers[key] = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self, let idx = self.mappings.firstIndex(where: { $0.id == mapping.id }) else { return }
-            self.counterLock.lock()
+            os_unfair_lock_lock(&self.counterLock)
             let count = self.frameCounters[key] ?? 0
             self.frameCounters[key] = 0
-            self.counterLock.unlock()
+            os_unfair_lock_unlock(&self.counterLock)
             self.mappings[idx].fps = Double(count)
         }
 
         // Create receiver
-        var frameCount: UInt64 = 0
+        let frameCount = OSAllocatedUnfairLock(initialState: UInt64(0))
         switch mapping.source {
         case .ndi(let ndiSource):
             let receiver = NDIFrameReceiver()
             receiver.onPixelBuffer = { [weak encoder, weak self] pixelBuffer in
-                let pts = CMTime(value: CMTimeValue(frameCount), timescale: 30)
-                frameCount += 1
+                guard let self = self else { return }
+                let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
+                let pts = CMTime(value: CMTimeValue(count), timescale: 30)
                 encoder?.encode(pixelBuffer, timestamp: pts)
-                self?.counterLock.lock()
-                self?.frameCounters[key] = (self?.frameCounters[key] ?? 0) + 1
-                self?.counterLock.unlock()
+                os_unfair_lock_lock(&self.counterLock)
+                self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
+                os_unfair_lock_unlock(&self.counterLock)
             }
             receiver.connect(to: ndiSource)
             receivers[key] = receiver
@@ -157,12 +154,13 @@ class SourceManager: ObservableObject {
         case .syphon(let syphonSource):
             guard let receiver = SyphonFrameReceiver() else { return }
             receiver.onPixelBuffer = { [weak encoder, weak self] pixelBuffer in
-                let pts = CMTime(value: CMTimeValue(frameCount), timescale: 30)
-                frameCount += 1
+                guard let self = self else { return }
+                let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
+                let pts = CMTime(value: CMTimeValue(count), timescale: 30)
                 encoder?.encode(pixelBuffer, timestamp: pts)
-                self?.counterLock.lock()
-                self?.frameCounters[key] = (self?.frameCounters[key] ?? 0) + 1
-                self?.counterLock.unlock()
+                os_unfair_lock_lock(&self.counterLock)
+                self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
+                os_unfair_lock_unlock(&self.counterLock)
             }
             receiver.connect(to: syphonSource)
             receivers[key] = receiver
@@ -200,6 +198,7 @@ class SourceManager: ObservableObject {
         frameCounters.removeValue(forKey: key)
 
         mappings[idx].isActive = false
+        server.clearStreamCache(streamId: mapping.streamId)
         updateServerStreams()
     }
 
