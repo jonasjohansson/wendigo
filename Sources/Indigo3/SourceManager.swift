@@ -1,0 +1,213 @@
+import Foundation
+import Combine
+import CoreMedia
+
+enum AnySource: Hashable {
+    case ndi(NDISourceInfo)
+    case syphon(SyphonSourceInfo)
+
+    var name: String {
+        switch self {
+        case .ndi(let info): return "NDI: \(info.name)"
+        case .syphon(let info): return "Syphon: \(info.appName) - \(info.name)"
+        }
+    }
+
+    var type: String {
+        switch self {
+        case .ndi: return "NDI"
+        case .syphon: return "Syphon"
+        }
+    }
+}
+
+struct StreamMapping: Identifiable {
+    let id: UUID
+    let source: AnySource
+    var streamId: String
+    var isActive: Bool
+    var fps: Double = 0
+    var bitrate: Double = 0
+}
+
+class SourceManager: ObservableObject {
+    @Published var ndiSources: [NDISourceInfo] = []
+    @Published var syphonSources: [SyphonSourceInfo] = []
+    @Published var mappings: [StreamMapping] = []
+
+    private var ndiDiscovery: NDIDiscovery?
+    private var syphonDiscovery: SyphonDiscovery?
+    private var discoveryTimer: Timer?
+
+    let server = WebSocketServer()
+
+    // Per-mapping state
+    private var receivers: [String: Any] = [:]       // mapping.id -> receiver
+    private var encoders: [String: StreamEncoder] = [:] // mapping.id -> encoder
+    private var frameCounters: [String: Int] = [:]
+    private let counterLock = NSLock()
+    private var frameTimers: [String: Timer] = [:]
+
+
+    func startDiscovery() {
+        ndiDiscovery = NDIDiscovery()
+        syphonDiscovery = SyphonDiscovery()
+
+        discoveryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.refreshSources()
+        }
+        refreshSources()
+    }
+
+    func refreshSources() {
+        if let ndi = ndiDiscovery {
+            ndiSources = ndi.discoverSources()
+        }
+        if let syphon = syphonDiscovery {
+            syphonSources = syphon.discoverSources()
+        }
+    }
+
+    func addMapping(source: AnySource) {
+        let mapping = StreamMapping(
+            id: UUID(),
+            source: source,
+            streamId: slugifySource(source),
+            isActive: false
+        )
+        mappings.append(mapping)
+        startMapping(mapping)
+    }
+
+    /// Turn "NDI: MACHINE (Arena - FLOOR)" → "arena-floor"
+    private func slugifySource(_ source: AnySource) -> String {
+        var name: String
+        switch source {
+        case .ndi(let info):
+            // NDI names are "MACHINE (Source Name)" — extract the part in parens
+            if let open = info.name.range(of: "("),
+               let close = info.name.range(of: ")", range: open.upperBound..<info.name.endIndex) {
+                name = String(info.name[open.upperBound..<close.lowerBound])
+            } else {
+                name = info.name
+            }
+        case .syphon(let info):
+            name = "\(info.appName)-\(info.name)"
+        }
+
+        // Lowercase, replace spaces/special chars with hyphens, collapse multiples
+        return name
+            .lowercased()
+            .replacingOccurrences(of: " - ", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+            .replacingOccurrences(of: "[^a-z0-9\\-]", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "-{2,}", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    func removeMapping(_ mapping: StreamMapping) {
+        stopMapping(mapping)
+        mappings.removeAll { $0.id == mapping.id }
+    }
+
+    func startMapping(_ mapping: StreamMapping) {
+        guard let idx = mappings.firstIndex(where: { $0.id == mapping.id }) else { return }
+        let key = mapping.id.uuidString
+
+        // Create encoder
+        let encoder = StreamEncoder()
+        guard encoder.start() else {
+            print("Failed to start encoder for \(mapping.streamId)")
+            return
+        }
+        encoder.onEncodedFrame = { [weak self] type, timestamp, data in
+            self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
+        }
+        encoders[key] = encoder
+
+        // Track FPS
+        counterLock.lock()
+        frameCounters[key] = 0
+        counterLock.unlock()
+        frameTimers[key] = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self, let idx = self.mappings.firstIndex(where: { $0.id == mapping.id }) else { return }
+            self.counterLock.lock()
+            let count = self.frameCounters[key] ?? 0
+            self.frameCounters[key] = 0
+            self.counterLock.unlock()
+            self.mappings[idx].fps = Double(count)
+        }
+
+        // Create receiver
+        var frameCount: UInt64 = 0
+        switch mapping.source {
+        case .ndi(let ndiSource):
+            let receiver = NDIFrameReceiver()
+            receiver.onPixelBuffer = { [weak encoder, weak self] pixelBuffer in
+                let pts = CMTime(value: CMTimeValue(frameCount), timescale: 30)
+                frameCount += 1
+                encoder?.encode(pixelBuffer, timestamp: pts)
+                self?.counterLock.lock()
+                self?.frameCounters[key] = (self?.frameCounters[key] ?? 0) + 1
+                self?.counterLock.unlock()
+            }
+            receiver.connect(to: ndiSource)
+            receivers[key] = receiver
+
+        case .syphon(let syphonSource):
+            guard let receiver = SyphonFrameReceiver() else { return }
+            receiver.onPixelBuffer = { [weak encoder, weak self] pixelBuffer in
+                let pts = CMTime(value: CMTimeValue(frameCount), timescale: 30)
+                frameCount += 1
+                encoder?.encode(pixelBuffer, timestamp: pts)
+                self?.counterLock.lock()
+                self?.frameCounters[key] = (self?.frameCounters[key] ?? 0) + 1
+                self?.counterLock.unlock()
+            }
+            receiver.connect(to: syphonSource)
+            receivers[key] = receiver
+        }
+
+        mappings[idx].isActive = true
+        updateServerStreams()
+    }
+
+    private func updateServerStreams() {
+        var streams: [String: WebSocketServer.StreamInfo] = [:]
+        for m in mappings where m.isActive {
+            streams[m.streamId] = WebSocketServer.StreamInfo(
+                streamId: m.streamId,
+                sourceName: m.source.name,
+                sourceType: m.source.type
+            )
+        }
+        server.activeStreams = streams
+    }
+
+    func stopMapping(_ mapping: StreamMapping) {
+        guard let idx = mappings.firstIndex(where: { $0.id == mapping.id }) else { return }
+        let key = mapping.id.uuidString
+
+        if let r = receivers[key] as? NDIFrameReceiver { r.disconnect() }
+        if let r = receivers[key] as? SyphonFrameReceiver { r.disconnect() }
+        receivers.removeValue(forKey: key)
+
+        encoders[key]?.stop()
+        encoders.removeValue(forKey: key)
+
+        frameTimers[key]?.invalidate()
+        frameTimers.removeValue(forKey: key)
+        frameCounters.removeValue(forKey: key)
+
+        mappings[idx].isActive = false
+        updateServerStreams()
+    }
+
+    func stopAll() {
+        for mapping in mappings where mapping.isActive {
+            stopMapping(mapping)
+        }
+        discoveryTimer?.invalidate()
+        server.stop()
+    }
+}
