@@ -1,6 +1,8 @@
 import Foundation
 import Combine
 import CoreMedia
+import CoreVideo
+import AppKit
 import os
 
 enum AnySource: Hashable {
@@ -34,6 +36,13 @@ class SourceManager: ObservableObject {
     @Published var ndiSources: [NDISourceInfo] = []
     @Published var syphonSources: [SyphonSourceInfo] = []
     @Published var mappings: [StreamMapping] = []
+
+    // Preview
+    @Published var previewMappingId: UUID?
+    @Published var previewImage: NSImage?
+    @Published var previewResolution: String = ""
+    private var lastPreviewTime: UInt64 = 0
+    private let previewIntervalNs: UInt64 = 100_000_000  // ~10fps
 
     private var ndiDiscovery: NDIDiscovery?
     private var syphonDiscovery: SyphonDiscovery?
@@ -139,6 +148,7 @@ class SourceManager: ObservableObject {
         switch mapping.source {
         case .ndi(let ndiSource):
             let receiver = NDIFrameReceiver()
+            let mappingId = mapping.id
             receiver.onPixelBuffer = { [weak encoder, weak self] pixelBuffer in
                 guard let self = self else { return }
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
@@ -147,12 +157,14 @@ class SourceManager: ObservableObject {
                 os_unfair_lock_lock(&self.counterLock)
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
                 os_unfair_lock_unlock(&self.counterLock)
+                self.capturePreviewIfNeeded(mappingId: mappingId, pixelBuffer: pixelBuffer)
             }
             receiver.connect(to: ndiSource)
             receivers[key] = receiver
 
         case .syphon(let syphonSource):
             guard let receiver = SyphonFrameReceiver() else { return }
+            let mappingId = mapping.id
             receiver.onPixelBuffer = { [weak encoder, weak self] pixelBuffer in
                 guard let self = self else { return }
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
@@ -161,6 +173,7 @@ class SourceManager: ObservableObject {
                 os_unfair_lock_lock(&self.counterLock)
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
                 os_unfair_lock_unlock(&self.counterLock)
+                self.capturePreviewIfNeeded(mappingId: mappingId, pixelBuffer: pixelBuffer)
             }
             receiver.connect(to: syphonSource)
             receivers[key] = receiver
@@ -195,9 +208,16 @@ class SourceManager: ObservableObject {
 
         frameTimers[key]?.invalidate()
         frameTimers.removeValue(forKey: key)
+        os_unfair_lock_lock(&counterLock)
         frameCounters.removeValue(forKey: key)
+        os_unfair_lock_unlock(&counterLock)
 
         mappings[idx].isActive = false
+        if previewMappingId == mapping.id {
+            previewMappingId = nil
+            previewImage = nil
+            previewResolution = ""
+        }
         server.clearStreamCache(streamId: mapping.streamId)
         updateServerStreams()
     }
@@ -208,5 +228,41 @@ class SourceManager: ObservableObject {
         }
         discoveryTimer?.invalidate()
         server.stop()
+    }
+
+    /// Capture a preview frame if this mapping is selected and enough time has passed
+    private func capturePreviewIfNeeded(mappingId: UUID, pixelBuffer: CVPixelBuffer) {
+        guard previewMappingId == mappingId else { return }
+        let now = mach_absolute_time()
+        // Throttle: only convert ~10 frames per second
+        guard now - lastPreviewTime > previewIntervalNs else { return }
+        lastPreviewTime = now
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let resolution = "\(width) x \(height)"
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+
+        guard let context = CGContext(
+            data: baseAddress,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ), let cgImage = context.makeImage() else { return }
+
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+        DispatchQueue.main.async {
+            self.previewImage = image
+            self.previewResolution = resolution
+        }
     }
 }

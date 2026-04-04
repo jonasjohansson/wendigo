@@ -1,23 +1,22 @@
 #!/bin/bash
-# Bundle Indigo3 as a proper macOS .app
+# Bundle Indigo3 as a proper macOS .app and install to /Applications
 set -e
 
 APP_NAME="Indigo3"
-BUILD_DIR=".build/arm64-apple-macosx/debug"
-BUNDLE_DIR="$BUILD_DIR/$APP_NAME.app"
+BUNDLE_DIR="/Applications/$APP_NAME.app"
 CONTENTS="$BUNDLE_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 
-# Build first
-swift build
+# Build release
+swift build -c release
 
 # Create bundle structure
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$MACOS" "$RESOURCES"
 
 # Copy binary
-cp "$BUILD_DIR/$APP_NAME" "$MACOS/$APP_NAME"
+cp ".build/release/$APP_NAME" "$MACOS/$APP_NAME"
 
 # Copy icon if exists
 if [ -f "Resources/AppIcon.icns" ]; then
@@ -69,5 +68,5 @@ cat > "$CONTENTS/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-echo "✓ Bundled: $BUNDLE_DIR"
-echo "  Run with: open $BUNDLE_DIR"
+echo "Installed $APP_NAME.app to /Applications"
+echo "Run with: open /Applications/$APP_NAME.app"

@@ -84,10 +84,10 @@ class WebSocketServer: ObservableObject {
 
             // Send cached config + keyframe so decoder can initialize immediately
             if let config = self.latestConfig[streamId] {
-                self.sendFrame(to: connection, type: 0x00, timestamp: 0, data: config)
+                self.sendInitialFrame(to: connection, type: 0x00, timestamp: 0, data: config)
             }
             if let (ts, keyframe) = self.latestKeyframe[streamId] {
-                self.sendFrame(to: connection, type: 0x01, timestamp: ts, data: keyframe)
+                self.sendInitialFrame(to: connection, type: 0x01, timestamp: ts, data: keyframe)
             }
 
             // Keep listening for messages (e.g. ping/pong, close)
@@ -137,34 +137,47 @@ class WebSocketServer: ObservableObject {
 
             guard let clients = self.connections[streamId] else { return }
 
+            // Pre-build the frame once for all clients
+            var frame = Data(capacity: 9 + data.count)
+            frame.append(type)
+            var ts = timestamp.bigEndian
+            frame.append(Data(bytes: &ts, count: 8))
+            frame.append(data)
+
+            // Identify stalled clients first, then remove after iteration
+            var stalledClients: [NWConnection] = []
             for connection in clients {
-                self.sendFrame(to: connection, type: type, timestamp: timestamp, data: data)
+                let connId = ObjectIdentifier(connection)
+                let pending = self.pendingSendCounts[connId, default: 0]
+                if pending >= self.maxPendingSends {
+                    stalledClients.append(connection)
+                    continue
+                }
+                self.pendingSendCounts[connId] = pending + 1
+                self.sendFrame(to: connection, frame: frame, connId: connId)
+            }
+
+            // Remove stalled clients after iteration is complete
+            for connection in stalledClients {
+                self.removeClient(connection, streamId: streamId)
             }
         }
     }
 
-    private func sendFrame(to connection: NWConnection, type: UInt8, timestamp: UInt64, data: Data) {
-        let connId = ObjectIdentifier(connection)
-
-        // Drop frame if client has too many pending sends (backpressure)
-        let pending = pendingSendCounts[connId, default: 0]
-        if pending >= maxPendingSends {
-            // Stalled client — disconnect
-            for (streamId, clients) in connections where clients.contains(where: { $0 === connection }) {
-                removeClient(connection, streamId: streamId)
-                break
-            }
-            return
-        }
-        pendingSendCounts[connId] = pending + 1
-
-        // Header: [type(1)] [timestamp(8)] [data...]
+    /// Send a single frame to a specific connection (used for initial config/keyframe on join)
+    private func sendInitialFrame(to connection: NWConnection, type: UInt8, timestamp: UInt64, data: Data) {
         var frame = Data(capacity: 9 + data.count)
         frame.append(type)
         var ts = timestamp.bigEndian
         frame.append(Data(bytes: &ts, count: 8))
         frame.append(data)
 
+        let connId = ObjectIdentifier(connection)
+        pendingSendCounts[connId] = (pendingSendCounts[connId] ?? 0) + 1
+        sendFrame(to: connection, frame: frame, connId: connId)
+    }
+
+    private func sendFrame(to connection: NWConnection, frame: Data, connId: ObjectIdentifier) {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
         let context = NWConnection.ContentContext(identifier: "frame", metadata: [metadata])
         connection.send(content: frame, contentContext: context, completion: .contentProcessed({ [weak self] _ in
@@ -194,11 +207,22 @@ class WebSocketServer: ObservableObject {
 
     func stop() {
         listener?.cancel()
-        for (_, clients) in connections {
-            for c in clients { c.cancel() }
+        queue.sync {
+            for (_, clients) in connections {
+                for c in clients { c.cancel() }
+            }
+            connections.removeAll()
+            pendingSendCounts.removeAll()
+            latestConfig.removeAll()
+            latestKeyframe.removeAll()
+            _activeStreams.removeAll()
         }
-        connections.removeAll()
+        DispatchQueue.main.async {
+            self.clientCounts.removeAll()
+        }
     }
 
-    deinit { stop() }
+    deinit {
+        listener?.cancel()
+    }
 }

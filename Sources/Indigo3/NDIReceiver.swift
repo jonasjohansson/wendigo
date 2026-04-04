@@ -41,6 +41,7 @@ class NDIFrameReceiver {
     private var recvInstance: NDIlib_recv_instance_t?
     private let isRunning = OSAllocatedUnfairLock(initialState: false)
     private let receiveQueue = DispatchQueue(label: "indigo3.ndi.receive", qos: .userInteractive)
+    private let loopExited = DispatchSemaphore(value: 0)
 
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth: Int = 0
@@ -74,6 +75,7 @@ class NDIFrameReceiver {
     }
 
     private func receiveLoop() {
+        defer { loopExited.signal() }
         guard let recv = recvInstance else { return }
 
         while isRunning.withLock({ $0 }) {
@@ -135,7 +137,15 @@ class NDIFrameReceiver {
     }
 
     func disconnect() {
-        isRunning.withLock { $0 = false }
+        let wasRunning = isRunning.withLock { val -> Bool in
+            let was = val
+            val = false
+            return was
+        }
+        if wasRunning {
+            // Wait for the receive loop to finish before destroying the instance
+            loopExited.wait()
+        }
         if let recv = recvInstance {
             NDIlib_recv_destroy(recv)
             recvInstance = nil

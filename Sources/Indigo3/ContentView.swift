@@ -48,8 +48,8 @@ struct ContentView: View {
             }
             .frame(minWidth: 250)
 
-            // Streams panel
-            VStack(alignment: .leading) {
+            // Streams + Preview panel
+            VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text("Streams")
                         .font(.headline)
@@ -62,6 +62,7 @@ struct ContentView: View {
 
                 List {
                     ForEach(sourceManager.mappings) { mapping in
+                        let isPreview = sourceManager.previewMappingId == mapping.id
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
                                 Circle()
@@ -70,6 +71,17 @@ struct ContentView: View {
                                 Text(mapping.source.name)
                                     .fontWeight(.medium)
                                 Spacer()
+                                Button(isPreview ? "Hide Preview" : "Preview") {
+                                    if isPreview {
+                                        sourceManager.previewMappingId = nil
+                                        sourceManager.previewImage = nil
+                                        sourceManager.previewResolution = ""
+                                    } else {
+                                        sourceManager.previewMappingId = mapping.id
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(isPreview ? .orange : .accentColor)
                                 Button("Remove") {
                                     sourceManager.removeMapping(mapping)
                                 }
@@ -101,6 +113,34 @@ struct ContentView: View {
                         Text("Add a source to start streaming")
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                // Preview pane
+                if sourceManager.previewMappingId != nil {
+                    Divider()
+                    VStack(spacing: 4) {
+                        if let image = sourceManager.previewImage {
+                            Image(nsImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(maxHeight: 300)
+                                .background(Color.black)
+                        } else {
+                            Rectangle()
+                                .fill(Color.black)
+                                .frame(height: 200)
+                                .overlay(
+                                    Text("Waiting for frames...")
+                                        .foregroundStyle(.secondary)
+                                )
+                        }
+                        if !sourceManager.previewResolution.isEmpty {
+                            Text(sourceManager.previewResolution)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(8)
                 }
             }
             .frame(minWidth: 300)
