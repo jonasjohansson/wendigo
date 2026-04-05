@@ -2,12 +2,21 @@ import Foundation
 import AppKit
 import Metal
 import CoreVideo
+import OSLog
 import CSyphon
 
-struct SyphonSourceInfo: Identifiable, Hashable {
-    let id = UUID()
+private let logger = Logger(subsystem: "wendigo", category: "Syphon")
+
+struct SyphonSourceInfo: Identifiable, Hashable, Codable {
+    let id: UUID
     let name: String
     let appName: String
+
+    init(name: String, appName: String) {
+        self.id = UUID()
+        self.name = name
+        self.appName = appName
+    }
 }
 
 class SyphonDiscovery {
@@ -49,7 +58,11 @@ class SyphonFrameReceiver {
             return name == source.name && app == source.appName
         }
 
-        guard let serverDesc = matching else { return }
+        guard let serverDesc = matching else {
+            logger.warning("Syphon server not found: \(source.appName) - \(source.name)")
+            return
+        }
+        logger.info("Connecting to Syphon: \(source.appName) - \(source.name)")
 
         client = SyphonMetalClient(
             serverDescription: serverDesc,
@@ -68,6 +81,8 @@ class SyphonFrameReceiver {
 
         // Recreate pool if dimensions changed
         if width != poolWidth || height != poolHeight {
+            // Release old pool before creating new one to avoid memory leak
+            pixelBufferPool = nil
             let attrs: [String: Any] = [
                 kCVPixelBufferMetalCompatibilityKey as String: true,
                 kCVPixelBufferWidthKey as String: width,
@@ -77,6 +92,7 @@ class SyphonFrameReceiver {
             CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &pixelBufferPool)
             poolWidth = width
             poolHeight = height
+            logger.info("Syphon pool recreated: \(width)x\(height)")
         }
 
         guard let pool = pixelBufferPool else { return }

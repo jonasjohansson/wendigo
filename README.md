@@ -1,4 +1,4 @@
-# Indigo3
+# Wendigo
 
 A macOS app that bridges NDI and Syphon video sources to WebSocket clients via real-time HEVC (H.265) encoding. Useful for sending live video from professional video tools to web browsers or custom applications over a local network.
 
@@ -8,7 +8,7 @@ A macOS app that bridges NDI and Syphon video sources to WebSocket clients via r
 NDI / Syphon source  -->  Hardware HEVC encoder  -->  WebSocket server (port 9000)  -->  Browser / app
 ```
 
-1. Indigo3 discovers available NDI and Syphon sources on your machine/network.
+1. Wendigo discovers available NDI and Syphon sources on your machine/network.
 2. You add sources to create stream mappings, each with a unique stream ID.
 3. Each source is captured, encoded to HEVC using macOS VideoToolbox (hardware-accelerated on Apple Silicon), and broadcast as binary WebSocket frames.
 4. Clients connect, request a stream ID, and receive a live HEVC stream.
@@ -26,14 +26,14 @@ NDI / Syphon source  -->  Hardware HEVC encoder  -->  WebSocket server (port 900
 
 ```bash
 # Clone the repo
-git clone https://github.com/jonasjohansson/indigo3.git
-cd indigo3
+git clone https://github.com/jonasjohansson/wendigo.git
+cd wendigo
 
 # Build release and install to /Applications
 bash bundle.sh
 
 # Or run directly from source
-swift run Indigo3
+swift run Wendigo
 ```
 
 You can also open `Package.swift` in Xcode for a GUI build/run experience.
@@ -42,7 +42,7 @@ You can also open `Package.swift` in Xcode for a GUI build/run experience.
 
 ### 1. Launch the app
 
-Open Indigo3 from `/Applications`, or run `swift run Indigo3` from the repo.
+Open Wendigo from `/Applications`, or run `swift run Wendigo` from the repo.
 
 A window opens with two panels:
 

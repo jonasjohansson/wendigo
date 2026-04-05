@@ -1,20 +1,28 @@
 import Foundation
 import VideoToolbox
 import CoreMedia
+import OSLog
+
+private let logger = Logger(subsystem: "wendigo", category: "Encoder")
 
 class StreamEncoder {
     private var session: VTCompressionSession?
     private var retainedSelf: Unmanaged<StreamEncoder>?  // prevents dangling pointer in VT callback
-    private var vps: Data?
     private var sps: Data?
     private var pps: Data?
 
     /// Called with encoded NALU data: (type, timestamp_us, data)
-    /// type: 0x00 = VPS/SPS/PPS config, 0x01 = keyframe, 0x02 = delta
+    /// type: 0x00 = SPS/PPS config, 0x01 = keyframe, 0x02 = delta
     var onEncodedFrame: ((UInt8, UInt64, Data) -> Void)?
 
-    private var currentWidth: Int32 = 0
-    private var currentHeight: Int32 = 0
+    private(set) var currentWidth: Int32 = 0
+    private(set) var currentHeight: Int32 = 0
+
+    var currentResolution: String {
+        currentWidth > 0 ? "\(currentWidth)x\(currentHeight)" : ""
+    }
+    private var framesSinceLastInput: Int = 0
+    private var forceNextKeyframe = false
 
     /// Ensure the compression session matches the given dimensions, recreating if needed.
     private func ensureSession(width: Int32, height: Int32) -> Bool {
@@ -33,7 +41,6 @@ class StreamEncoder {
 
         currentWidth = width
         currentHeight = height
-        vps = nil
         sps = nil
         pps = nil
 
@@ -51,7 +58,7 @@ class StreamEncoder {
             allocator: nil,
             width: width,
             height: height,
-            codecType: kCMVideoCodecType_HEVC,
+            codecType: kCMVideoCodecType_H264,
             encoderSpecification: nil,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
@@ -60,18 +67,27 @@ class StreamEncoder {
             compressionSessionOut: &session
         )
 
-        guard status == noErr, let session = session else { return false }
+        guard status == noErr, let session = session else {
+            logger.error("Failed to create H.264 session: \(status)")
+            return false
+        }
+        logger.info("H.264 encoder created: \(width)x\(height)")
 
-        // Low-latency real-time HEVC encoding
+        // Low-latency real-time H.264 encoding
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 30 as CFNumber)
-        // Scale bitrate with pixel count (10 Mbps baseline at 1080p — HEVC is ~40% more efficient)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 300 as CFNumber)
+        // Scale bitrate with pixel count (5 Mbps baseline at 1080p — keeps GPU load manageable with multiple streams)
         let pixels = Double(width) * Double(height)
-        let bitrate = Int(10_000_000 * (pixels / (1920.0 * 1080.0)))
+        let bitrate = Int(5_000_000 * (pixels / (1920.0 * 1080.0)))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
+        // Cap peak bitrate to 2x average over 1 second — prevents keyframe spikes
+        let maxBytesPerSecond = (bitrate * 2) / 8
+        let dataRateLimits: [Int] = [maxBytesPerSecond, 1]  // [bytes, seconds]
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
+                             value: dataRateLimits as CFArray)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
-                             value: kVTProfileLevel_HEVC_Main_AutoLevel)
+                             value: kVTProfileLevel_H264_High_AutoLevel)
 
         status = VTCompressionSessionPrepareToEncodeFrames(session)
         return status == noErr
@@ -81,12 +97,19 @@ class StreamEncoder {
         let width = Int32(CVPixelBufferGetWidth(pixelBuffer))
         let height = Int32(CVPixelBufferGetHeight(pixelBuffer))
         guard ensureSession(width: width, height: height), let session = session else { return }
+
+        var frameProps: CFDictionary? = nil
+        if forceNextKeyframe {
+            forceNextKeyframe = false
+            frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
+        }
+
         VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: timestamp,
             duration: .invalid,
-            frameProperties: nil,
+            frameProperties: frameProps,
             sourceFrameRefcon: nil,
             infoFlagsOut: nil
         )
@@ -108,7 +131,7 @@ class StreamEncoder {
             }
         }
 
-        // Extract VPS/SPS/PPS from keyframes
+        // Extract SPS/PPS from keyframes
         if isKeyframe {
             if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
                 extractParameterSets(formatDesc)
@@ -127,47 +150,35 @@ class StreamEncoder {
     }
 
     private func extractParameterSets(_ formatDesc: CMFormatDescription) {
-        // HEVC has 3 parameter sets: VPS (index 0), SPS (index 1), PPS (index 2)
-        var vpsSize = 0, vpsCount = 0
+        // H.264 has 2 parameter sets: SPS (index 0), PPS (index 1)
         var spsSize = 0, spsCount = 0
         var ppsSize = 0, ppsCount = 0
-        var vpsPtr: UnsafePointer<UInt8>?
         var spsPtr: UnsafePointer<UInt8>?
         var ppsPtr: UnsafePointer<UInt8>?
 
-        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
             formatDesc, parameterSetIndex: 0,
-            parameterSetPointerOut: &vpsPtr, parameterSetSizeOut: &vpsSize,
-            parameterSetCountOut: &vpsCount, nalUnitHeaderLengthOut: nil
-        )
-        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-            formatDesc, parameterSetIndex: 1,
             parameterSetPointerOut: &spsPtr, parameterSetSizeOut: &spsSize,
             parameterSetCountOut: &spsCount, nalUnitHeaderLengthOut: nil
         )
-        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-            formatDesc, parameterSetIndex: 2,
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            formatDesc, parameterSetIndex: 1,
             parameterSetPointerOut: &ppsPtr, parameterSetSizeOut: &ppsSize,
             parameterSetCountOut: &ppsCount, nalUnitHeaderLengthOut: nil
         )
 
-        if let vpsPtr = vpsPtr, let spsPtr = spsPtr, let ppsPtr = ppsPtr {
-            let newVps = Data(bytes: vpsPtr, count: vpsSize)
+        if let spsPtr = spsPtr, let ppsPtr = ppsPtr {
             let newSps = Data(bytes: spsPtr, count: spsSize)
             let newPps = Data(bytes: ppsPtr, count: ppsSize)
 
             // Only send if changed
-            if newVps != vps || newSps != sps || newPps != pps {
-                vps = newVps
+            if newSps != sps || newPps != pps {
                 sps = newSps
                 pps = newPps
-                // Pack VPS + SPS + PPS: [vpsLen(4)] [vps] [spsLen(4)] [sps] [ppsLen(4)] [pps]
+                // Pack SPS + PPS: [spsLen(4)] [sps] [ppsLen(4)] [pps]
                 var configData = Data()
-                var vLen = UInt32(vpsSize).bigEndian
                 var sLen = UInt32(spsSize).bigEndian
                 var pLen = UInt32(ppsSize).bigEndian
-                configData.append(Data(bytes: &vLen, count: 4))
-                configData.append(newVps)
                 configData.append(Data(bytes: &sLen, count: 4))
                 configData.append(newSps)
                 configData.append(Data(bytes: &pLen, count: 4))
@@ -178,13 +189,10 @@ class StreamEncoder {
     }
 
     var latestConfig: Data? {
-        guard let vps = vps, let sps = sps, let pps = pps else { return nil }
+        guard let sps = sps, let pps = pps else { return nil }
         var configData = Data()
-        var vLen = UInt32(vps.count).bigEndian
         var sLen = UInt32(sps.count).bigEndian
         var pLen = UInt32(pps.count).bigEndian
-        configData.append(Data(bytes: &vLen, count: 4))
-        configData.append(vps)
         configData.append(Data(bytes: &sLen, count: 4))
         configData.append(sps)
         configData.append(Data(bytes: &pLen, count: 4))

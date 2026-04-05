@@ -1,8 +1,8 @@
 #!/bin/bash
-# Bundle Indigo3 as a proper macOS .app and install to /Applications
+# Bundle Wendigo as a proper macOS .app and install to /Applications
 set -e
 
-APP_NAME="Indigo3"
+APP_NAME="Wendigo"
 BUNDLE_DIR="/Applications/$APP_NAME.app"
 CONTENTS="$BUNDLE_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
@@ -37,17 +37,17 @@ cat > "$CONTENTS/Info.plist" << 'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Indigo3</string>
+    <string>Wendigo</string>
     <key>CFBundleDisplayName</key>
-    <string>Indigo3</string>
+    <string>Wendigo</string>
     <key>CFBundleIdentifier</key>
-    <string>com.jonasjohansson.indigo3</string>
+    <string>com.jonasjohansson.wendigo</string>
     <key>CFBundleVersion</key>
     <string>1.0.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0.0</string>
     <key>CFBundleExecutable</key>
-    <string>Indigo3</string>
+    <string>Wendigo</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
@@ -57,9 +57,9 @@ cat > "$CONTENTS/Info.plist" << 'PLIST'
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSCameraUsageDescription</key>
-    <string>Indigo3 can capture from camera sources</string>
+    <string>Wendigo can capture from camera sources</string>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Indigo3 discovers NDI sources on the local network</string>
+    <string>Wendigo discovers NDI sources on the local network</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_ndi._tcp</string>

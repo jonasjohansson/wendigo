@@ -2,6 +2,12 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var sourceManager: SourceManager
+    @State private var showTestConfig = false
+    @State private var testLabel = "test"
+    @State private var testPresetIndex = 1  // default 1080p
+    @State private var testCustomW = "1920"
+    @State private var testCustomH = "1080"
+    @State private var testUseCustom = false
 
     var body: some View {
         HSplitView {
@@ -40,13 +46,65 @@ struct ContentView: View {
                         }
                     }
 
+                    Section("Test Pattern") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("ID:")
+                                    .frame(width: 30, alignment: .leading)
+                                TextField("stream-id", text: $testLabel)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 140)
+                            }
+
+                            if !testUseCustom {
+                                Picker("Resolution", selection: $testPresetIndex) {
+                                    ForEach(0..<TestSourceConfig.presets.count, id: \.self) { i in
+                                        let p = TestSourceConfig.presets[i]
+                                        Text("\(p.name) (\(p.width)x\(p.height))").tag(i)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                            } else {
+                                HStack {
+                                    TextField("W", text: $testCustomW)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 60)
+                                    Text("x")
+                                    TextField("H", text: $testCustomH)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 60)
+                                }
+                            }
+
+                            HStack {
+                                Toggle("Custom", isOn: $testUseCustom)
+                                    .toggleStyle(.checkbox)
+                                Spacer()
+                                Button("Add") {
+                                    let config: TestSourceConfig
+                                    if testUseCustom {
+                                        let w = Int(testCustomW) ?? 1920
+                                        let h = Int(testCustomH) ?? 1080
+                                        config = TestSourceConfig(width: max(64, w), height: max(64, h), label: testLabel)
+                                    } else {
+                                        let p = TestSourceConfig.presets[testPresetIndex]
+                                        config = TestSourceConfig(width: p.width, height: p.height, label: testLabel)
+                                    }
+                                    sourceManager.addMapping(source: .test(config))
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+
                     if sourceManager.ndiSources.isEmpty && sourceManager.syphonSources.isEmpty {
                         Text("Searching for sources...")
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-            .frame(minWidth: 250)
+            .frame(minWidth: 280)
 
             // Streams + Preview panel
             VStack(alignment: .leading, spacing: 0) {
@@ -99,6 +157,11 @@ struct ContentView: View {
                             }
 
                             HStack {
+                                if !mapping.resolution.isEmpty {
+                                    Text(mapping.resolution)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                                 Text("\(Int(mapping.fps)) fps")
                                     .font(.caption)
                                 let clients = sourceManager.server.clientCounts[mapping.streamId] ?? 0
@@ -165,24 +228,30 @@ private func cleanNDIName(_ name: String) -> String {
 }
 
 func getLocalIP() -> String {
-    var address = "localhost"
     var ifaddr: UnsafeMutablePointer<ifaddrs>?
-    guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return address }
+    guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return "localhost" }
     defer { freeifaddrs(ifaddr) }
+
+    // Prefer common interfaces in order; pick the first IPv4 match
+    let preferred = ["en0", "en1", "en2", "en3", "en4", "bridge0"]
+    var candidates: [String: String] = [:]  // interface name -> IP
 
     for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
         let interface = ptr.pointee
-        let addrFamily = interface.ifa_addr.pointee.sa_family
-        if addrFamily == UInt8(AF_INET) {
-            let name = String(cString: interface.ifa_name)
-            if name == "en0" {
-                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len),
-                           &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
-                address = String(cString: hostname)
-                break
-            }
-        }
+        guard interface.ifa_addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+        let name = String(cString: interface.ifa_name)
+        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len),
+                   &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+        let ip = String(cString: hostname)
+        // Skip loopback
+        if ip.hasPrefix("127.") { continue }
+        candidates[name] = ip
     }
-    return address
+
+    for name in preferred {
+        if let ip = candidates[name] { return ip }
+    }
+    // Fall back to any non-loopback IPv4 address
+    return candidates.values.first ?? "localhost"
 }

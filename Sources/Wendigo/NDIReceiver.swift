@@ -1,11 +1,18 @@
 import Foundation
 import CoreVideo
-import os
+import OSLog
 import CNDI
 
-struct NDISourceInfo: Identifiable, Hashable {
-    let id = UUID()
+private let logger = Logger(subsystem: "wendigo", category: "NDI")
+
+struct NDISourceInfo: Identifiable, Hashable, Codable {
+    let id: UUID
     let name: String
+
+    init(name: String) {
+        self.id = UUID()
+        self.name = name
+    }
 }
 
 class NDIDiscovery {
@@ -40,19 +47,22 @@ class NDIDiscovery {
 class NDIFrameReceiver {
     private var recvInstance: NDIlib_recv_instance_t?
     private let isRunning = OSAllocatedUnfairLock(initialState: false)
-    private let receiveQueue = DispatchQueue(label: "indigo3.ndi.receive", qos: .userInteractive)
+    private let receiveQueue = DispatchQueue(label: "wendigo.ndi.receive", qos: .userInteractive)
     private let loopExited = DispatchSemaphore(value: 0)
 
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth: Int = 0
     private var poolHeight: Int = 0
+    private let stalledThresholdSeconds: Double = 15.0  // generous: NDI sources can take 10+ seconds to start
+    private let initialGracePeriod: Double = 20.0       // don't report stall during initial connection
 
     var onPixelBuffer: ((CVPixelBuffer) -> Void)?
+    var onSourceStalled: (() -> Void)?
 
     func connect(to source: NDISourceInfo) {
         // Retain NSStrings so their utf8String pointers stay valid through NDI API calls
         let sourceName = source.name as NSString
-        let recvName = "Indigo3" as NSString
+        let recvName = "Wendigo" as NSString
 
         var ndiSource = NDIlib_source_t()
         ndiSource.p_ndi_name = sourceName.utf8String
@@ -66,7 +76,11 @@ class NDIFrameReceiver {
 
         recvInstance = NDIlib_recv_create_v3(&settings)
         _ = (sourceName, recvName)  // prevent premature release
-        guard recvInstance != nil else { return }
+        guard recvInstance != nil else {
+            logger.error("Failed to create NDI receiver for \(source.name)")
+            return
+        }
+        logger.info("Connected to NDI source: \(source.name)")
 
         isRunning.withLock { $0 = true }
         receiveQueue.async { [weak self] in
@@ -78,12 +92,40 @@ class NDIFrameReceiver {
         defer { loopExited.signal() }
         guard let recv = recvInstance else { return }
 
+        let connectTime = CFAbsoluteTimeGetCurrent()
+        var lastFrameTime = CFAbsoluteTimeGetCurrent()
+        var stalledNotified = false
+        var hasEverReceivedFrame = false
+
         while isRunning.withLock({ $0 }) {
             var videoFrame = NDIlib_video_frame_v2_t()
             var audioFrame = NDIlib_audio_frame_v2_t()
             var metadataFrame = NDIlib_metadata_frame_t()
 
             let frameType = NDIlib_recv_capture_v2(recv, &videoFrame, &audioFrame, &metadataFrame, 100)
+
+            // Detect stalled source (but not during initial connection grace period)
+            if frameType == NDIlib_frame_type_none {
+                let now = CFAbsoluteTimeGetCurrent()
+                let elapsed = now - lastFrameTime
+                let sinceConnect = now - connectTime
+                // Don't trigger stall during initial grace period (source may still be starting)
+                let threshold = hasEverReceivedFrame ? stalledThresholdSeconds : initialGracePeriod
+                if elapsed > threshold && sinceConnect > initialGracePeriod && !stalledNotified {
+                    stalledNotified = true
+                    logger.warning("NDI source stalled (no frames for \(String(format: "%.1f", elapsed))s)")
+                    onSourceStalled?()
+                }
+                continue
+            }
+
+            // Got a frame — reset stall tracking
+            lastFrameTime = CFAbsoluteTimeGetCurrent()
+            hasEverReceivedFrame = true
+            if stalledNotified {
+                logger.info("NDI source recovered")
+                stalledNotified = false
+            }
 
             switch frameType {
             case NDIlib_frame_type_video:
@@ -94,6 +136,8 @@ class NDIFrameReceiver {
 
                     // Recreate pool if dimensions changed
                     if width != self.poolWidth || height != self.poolHeight {
+                        // Release old pool before creating new one to avoid memory leak
+                        self.pixelBufferPool = nil
                         let attrs: [String: Any] = [
                             kCVPixelBufferWidthKey as String: width,
                             kCVPixelBufferHeightKey as String: height,
@@ -102,6 +146,7 @@ class NDIFrameReceiver {
                         CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &self.pixelBufferPool)
                         self.poolWidth = width
                         self.poolHeight = height
+                        logger.info("NDI pool recreated: \(width)x\(height)")
                     }
 
                     // Get a reusable pixel buffer from the pool
@@ -113,10 +158,15 @@ class NDIFrameReceiver {
                         CVPixelBufferLockBaseAddress(pb, [])
                         let dest = CVPixelBufferGetBaseAddress(pb)!
                         let destStride = CVPixelBufferGetBytesPerRow(pb)
-                        for row in 0..<height {
-                            memcpy(dest.advanced(by: row * destStride),
-                                   data.advanced(by: row * stride),
-                                   min(stride, destStride))
+                        if stride == destStride {
+                            // Fast path: single memcpy when strides match
+                            memcpy(dest, data, stride * height)
+                        } else {
+                            for row in 0..<height {
+                                memcpy(dest.advanced(by: row * destStride),
+                                       data.advanced(by: row * stride),
+                                       min(stride, destStride))
+                            }
                         }
                         CVPixelBufferUnlockBaseAddress(pb, [])
                         onPixelBuffer?(pb)

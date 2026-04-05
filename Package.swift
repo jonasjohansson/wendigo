@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Indigo3",
+    name: "Wendigo",
     platforms: [.macOS(.v14)],
     targets: [
         .target(
@@ -34,9 +34,9 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "Indigo3",
+            name: "Wendigo",
             dependencies: ["CSyphon", "CNDI"],
-            path: "Sources/Indigo3"
+            path: "Sources/Wendigo"
         )
     ]
 )
