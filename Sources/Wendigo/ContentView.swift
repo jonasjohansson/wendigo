@@ -177,41 +177,38 @@ struct ContentView: View {
                         Text("Add a source to start streaming")
                             .foregroundStyle(.secondary)
                     }
-                }
 
-                // Encoding settings
-                Divider()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Encoding").font(.headline)
-                    HStack {
-                        Text("Bitrate:")
-                            .frame(width: 70, alignment: .leading)
-                        Picker("", selection: $sourceManager.bitrateMbps) {
-                            Text("5 Mbps").tag(5)
-                            Text("10 Mbps").tag(10)
-                            Text("20 Mbps").tag(20)
-                            Text("30 Mbps").tag(30)
-                            Text("50 Mbps").tag(50)
+                    Section("Encoding") {
+                        HStack {
+                            Text("Bitrate")
+                            Spacer()
+                            Picker("", selection: $sourceManager.bitrateMbps) {
+                                Text("5").tag(5)
+                                Text("10").tag(10)
+                                Text("20").tag(20)
+                                Text("30").tag(30)
+                                Text("50").tag(50)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(maxWidth: 200)
+                            Text("Mbps")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .pickerStyle(.segmented)
-                    }
-                    HStack {
-                        Text("Keyframe:")
-                            .frame(width: 70, alignment: .leading)
-                        Picker("", selection: $sourceManager.keyframeInterval) {
-                            Text("Every frame").tag(1)
-                            Text("Every 1s").tag(60)
-                            Text("Every 2s").tag(120)
-                            Text("Every 5s").tag(300)
+                        HStack {
+                            Text("Keyframe")
+                            Spacer()
+                            Picker("", selection: $sourceManager.keyframeInterval) {
+                                Text("Every frame").tag(1)
+                                Text("1s").tag(60)
+                                Text("2s").tag(120)
+                                Text("5s").tag(300)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(maxWidth: 220)
                         }
-                        .pickerStyle(.segmented)
                     }
-                    Text("All-intra (every frame) = no stutter, higher bandwidth. Longer intervals = lower bandwidth, may stutter on keyframes.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
 
                 // Preview pane
                 if sourceManager.previewMappingId != nil {
