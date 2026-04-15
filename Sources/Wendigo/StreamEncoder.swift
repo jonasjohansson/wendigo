@@ -76,7 +76,7 @@ class StreamEncoder {
         // Low-latency real-time H.264 encoding
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 300 as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 30 as CFNumber)
         // Scale bitrate with pixel count (5 Mbps baseline at 1080p — keeps GPU load manageable with multiple streams)
         let pixels = Double(width) * Double(height)
         let bitrate = Int(5_000_000 * (pixels / (1920.0 * 1080.0)))
