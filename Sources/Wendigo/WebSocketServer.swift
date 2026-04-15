@@ -10,7 +10,7 @@ class WebSocketServer: ObservableObject {
 
     private var connections: [String: [NWConnection]] = [:]  // streamId -> connections
     private var pendingSendCounts: [ObjectIdentifier: Int] = [:]  // per-connection pending sends
-    private let maxPendingSends = 3
+    private let maxPendingSends = 5
     private let queue = DispatchQueue(label: "wendigo.ws.server")
     private let handshakeTimeout: TimeInterval = 5.0
     private var pingTimers: [ObjectIdentifier: DispatchSourceTimer] = [:]
