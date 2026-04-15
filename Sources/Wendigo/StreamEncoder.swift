@@ -77,9 +77,11 @@ class StreamEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 30 as CFNumber)
-        // Scale bitrate with pixel count (5 Mbps baseline at 1080p — keeps GPU load manageable with multiple streams)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 0.5 as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+        // Scale bitrate with pixel count (8 Mbps baseline at 1080p for LAN streaming quality)
         let pixels = Double(width) * Double(height)
-        let bitrate = Int(5_000_000 * (pixels / (1920.0 * 1080.0)))
+        let bitrate = Int(8_000_000 * (pixels / (1920.0 * 1080.0)))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
         // Cap peak bitrate to 2x average over 1 second — prevents keyframe spikes
         let maxBytesPerSecond = (bitrate * 2) / 8

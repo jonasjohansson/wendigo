@@ -151,9 +151,10 @@ struct ContentView: View {
                                 Text("ws://\(getLocalIP()):9000")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                Text("ID: \(mapping.streamId)")
+                                Text("ID:")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                StreamIdField(mapping: mapping, sourceManager: sourceManager)
                             }
 
                             HStack {
@@ -213,6 +214,24 @@ struct ContentView: View {
             sourceManager.startDiscovery()
             try? sourceManager.server.start()
         }
+    }
+}
+
+/// Editable stream ID that only commits on Enter or focus loss
+private struct StreamIdField: View {
+    let mapping: StreamMapping
+    @ObservedObject var sourceManager: SourceManager
+    @State private var draft: String = ""
+
+    var body: some View {
+        TextField("stream-id", text: $draft, onCommit: {
+            sourceManager.updateStreamId(for: mapping, newId: draft)
+        })
+        .textFieldStyle(.roundedBorder)
+        .font(.caption)
+        .frame(maxWidth: 150)
+        .onAppear { draft = mapping.streamId }
+        .onChange(of: mapping.streamId) { _, newVal in draft = newVal }
     }
 }
 

@@ -163,6 +163,27 @@ class SourceManager: ObservableObject {
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
+    func updateStreamId(for mapping: StreamMapping, newId: String) {
+        guard let idx = mappings.firstIndex(where: { $0.id == mapping.id }) else { return }
+        let oldId = mappings[idx].streamId
+        let trimmed = newId.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != oldId else { return }
+        // Migrate cached config/keyframe and connected clients to new stream ID
+        server.clearStreamCache(streamId: oldId)
+        server.disconnectClients(streamId: oldId)
+        mappings[idx].streamId = trimmed
+        // Update encoder's broadcast target
+        let key = mapping.id.uuidString
+        if let encoder = encoders[key] {
+            encoder.onEncodedFrame = { [weak self] type, timestamp, data in
+                self?.server.broadcast(streamId: trimmed, type: type, timestamp: timestamp, data: data)
+            }
+        }
+        updateServerStreams()
+        saveMappings()
+        logger.info("Stream ID changed: \(oldId) -> \(trimmed)")
+    }
+
     func removeMapping(_ mapping: StreamMapping) {
         stopMapping(mapping)
         mappings.removeAll { $0.id == mapping.id }
