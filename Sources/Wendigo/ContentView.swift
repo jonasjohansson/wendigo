@@ -118,6 +118,39 @@ struct ContentView: View {
                 }
                 .padding(.horizontal)
 
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Bitrate")
+                            .font(.caption)
+                            .frame(width: 55, alignment: .leading)
+                        Picker("", selection: $sourceManager.bitrateMbps) {
+                            Text("5").tag(5)
+                            Text("10").tag(10)
+                            Text("20").tag(20)
+                            Text("30").tag(30)
+                            Text("50").tag(50)
+                        }
+                        .pickerStyle(.segmented)
+                        Text("Mbps")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Keyframe")
+                            .font(.caption)
+                            .frame(width: 55, alignment: .leading)
+                        Picker("", selection: $sourceManager.keyframeInterval) {
+                            Text("All").tag(1)
+                            Text("1s").tag(60)
+                            Text("2s").tag(120)
+                            Text("5s").tag(300)
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+
                 List {
                     ForEach(sourceManager.mappings) { mapping in
                         let isPreview = sourceManager.previewMappingId == mapping.id
@@ -178,36 +211,6 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Section("Encoding") {
-                        HStack {
-                            Text("Bitrate")
-                            Spacer()
-                            Picker("", selection: $sourceManager.bitrateMbps) {
-                                Text("5").tag(5)
-                                Text("10").tag(10)
-                                Text("20").tag(20)
-                                Text("30").tag(30)
-                                Text("50").tag(50)
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(maxWidth: 200)
-                            Text("Mbps")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        HStack {
-                            Text("Keyframe")
-                            Spacer()
-                            Picker("", selection: $sourceManager.keyframeInterval) {
-                                Text("Every frame").tag(1)
-                                Text("1s").tag(60)
-                                Text("2s").tag(120)
-                                Text("5s").tag(300)
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(maxWidth: 220)
-                        }
-                    }
                 }
 
                 // Preview pane
