@@ -212,6 +212,9 @@ class StreamEncoder {
         session = nil
         retainedSelf?.release()
         retainedSelf = nil
+        // Reset dimensions so ensureSession recreates with new settings
+        currentWidth = 0
+        currentHeight = 0
     }
 
     deinit {

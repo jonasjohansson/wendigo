@@ -192,30 +192,18 @@ class SourceManager: ObservableObject {
         logger.info("Stream ID changed: \(oldId) -> \(trimmed)")
     }
 
-    /// Push current encoding settings to all active encoders (forces session recreation)
+    /// Push current encoding settings to all active encoders.
+    /// Stops the encoder session so it recreates with new settings on next frame.
+    /// Clients stay connected — they receive the new config automatically.
     private func applyEncodingSettings() {
-        for (key, encoder) in encoders {
-            encoder.keyframeInterval = keyframeInterval
-            encoder.bitrateMbps = bitrateMbps
-            // Force session recreation on next frame by resetting dimensions
-            encoder.stop()
+        for (_, encoder) in encoders {
+            encoder.keyframeInterval = self.keyframeInterval
+            encoder.bitrateMbps = self.bitrateMbps
+            encoder.stop()  // session recreates on next incoming frame
         }
-        // Reconnect all active mappings to pick up new settings
+        // Clear cached config/keyframes so clients get fresh ones
         for mapping in mappings where mapping.isActive {
-            let key = mapping.id.uuidString
-            if encoders[key] != nil {
-                let encoder = StreamEncoder()
-        encoder.keyframeInterval = keyframeInterval
-        encoder.bitrateMbps = bitrateMbps
-                encoder.keyframeInterval = keyframeInterval
-                encoder.bitrateMbps = bitrateMbps
-                encoder.onEncodedFrame = { [weak self] type, timestamp, data in
-                    self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
-                }
-                encoders[key] = encoder
-                server.clearStreamCache(streamId: mapping.streamId)
-                server.disconnectClients(streamId: mapping.streamId)
-            }
+            server.clearStreamCache(streamId: mapping.streamId)
         }
         logger.info("Encoding settings updated: \(self.bitrateMbps) Mbps, keyframe every \(self.keyframeInterval) frames")
     }
