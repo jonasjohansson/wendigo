@@ -1,6 +1,6 @@
 import SwiftUI
 
-let kBuildVersion = 6
+let kBuildVersion = 7
 
 struct ContentView: View {
     @ObservedObject var sourceManager: SourceManager

@@ -98,6 +98,7 @@ class SourceManager: ObservableObject {
     /// Per-mapping latest pixel buffer — only the newest is encoded, preventing queue buildup
     private var latestBuffers: [String: (CVPixelBuffer, CMTime)] = [:]
     private var encodeScheduled: [String: Bool] = [:]
+    private var encodeLock = os_unfair_lock()
     private let reconnectDelay: TimeInterval = 3.0
 
     // Persistence
@@ -260,13 +261,7 @@ class SourceManager: ObservableObject {
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
                 // Store latest buffer — overwrites any unprocessed frame
-                self.latestBuffers[key] = (pixelBuffer, pts)
-                if self.encodeScheduled[key] != true {
-                    self.encodeScheduled[key] = true
-                    encodeQueue.async { [weak self] in
-                        self?.encodeLatest(key: key, encoder: encoder)
-                    }
-                }
+                self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
                 os_unfair_lock_lock(&self.counterLock)
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
                 os_unfair_lock_unlock(&self.counterLock)
@@ -288,13 +283,7 @@ class SourceManager: ObservableObject {
                 guard let self = self else { return }
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
-                self.latestBuffers[key] = (pixelBuffer, pts)
-                if self.encodeScheduled[key] != true {
-                    self.encodeScheduled[key] = true
-                    encodeQueue.async { [weak self] in
-                        self?.encodeLatest(key: key, encoder: encoder)
-                    }
-                }
+                self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
                 os_unfair_lock_lock(&self.counterLock)
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
                 os_unfair_lock_unlock(&self.counterLock)
@@ -310,13 +299,7 @@ class SourceManager: ObservableObject {
                 guard let self = self else { return }
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
-                self.latestBuffers[key] = (pixelBuffer, pts)
-                if self.encodeScheduled[key] != true {
-                    self.encodeScheduled[key] = true
-                    encodeQueue.async { [weak self] in
-                        self?.encodeLatest(key: key, encoder: encoder)
-                    }
-                }
+                self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
                 os_unfair_lock_lock(&self.counterLock)
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
                 os_unfair_lock_unlock(&self.counterLock)
@@ -331,20 +314,44 @@ class SourceManager: ObservableObject {
         logger.info("Started mapping: \(mapping.source.name) -> \(mapping.streamId)")
     }
 
+    /// Store a pixel buffer and schedule encoding if not already scheduled
+    private func storeAndScheduleEncode(key: String, buffer: CVPixelBuffer, pts: CMTime, encoder: StreamEncoder?, encodeQueue: DispatchQueue) {
+        os_unfair_lock_lock(&encodeLock)
+        latestBuffers[key] = (buffer, pts)
+        let needsSchedule = encodeScheduled[key] != true
+        if needsSchedule { encodeScheduled[key] = true }
+        os_unfair_lock_unlock(&encodeLock)
+        if needsSchedule {
+            encodeQueue.async { [weak self] in
+                self?.encodeLatest(key: key, encoder: encoder)
+            }
+        }
+    }
+
     /// Encode only the latest frame for a mapping, then check for a newer one
     private func encodeLatest(key: String, encoder: StreamEncoder?) {
+        os_unfair_lock_lock(&encodeLock)
         guard let (buffer, pts) = latestBuffers[key] else {
             encodeScheduled[key] = false
+            os_unfair_lock_unlock(&encodeLock)
             return
         }
         latestBuffers.removeValue(forKey: key)
+        os_unfair_lock_unlock(&encodeLock)
+
         encoder?.encode(buffer, timestamp: pts)
 
         // Check if a newer frame arrived while we were encoding
-        if latestBuffers[key] != nil {
+        os_unfair_lock_lock(&encodeLock)
+        let hasNext = latestBuffers[key] != nil
+        os_unfair_lock_unlock(&encodeLock)
+
+        if hasNext {
             encodeLatest(key: key, encoder: encoder)
         } else {
+            os_unfair_lock_lock(&encodeLock)
             encodeScheduled[key] = false
+            os_unfair_lock_unlock(&encodeLock)
         }
     }
 
@@ -461,13 +468,7 @@ class SourceManager: ObservableObject {
                 guard let self = self else { return }
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
-                self.latestBuffers[key] = (pixelBuffer, pts)
-                if self.encodeScheduled[key] != true {
-                    self.encodeScheduled[key] = true
-                    encodeQueue.async { [weak self] in
-                        self?.encodeLatest(key: key, encoder: encoder)
-                    }
-                }
+                self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
                 os_unfair_lock_lock(&self.counterLock)
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
                 os_unfair_lock_unlock(&self.counterLock)
@@ -488,13 +489,7 @@ class SourceManager: ObservableObject {
                 guard let self = self else { return }
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
-                self.latestBuffers[key] = (pixelBuffer, pts)
-                if self.encodeScheduled[key] != true {
-                    self.encodeScheduled[key] = true
-                    encodeQueue.async { [weak self] in
-                        self?.encodeLatest(key: key, encoder: encoder)
-                    }
-                }
+                self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
                 os_unfair_lock_lock(&self.counterLock)
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
                 os_unfair_lock_unlock(&self.counterLock)
@@ -509,13 +504,7 @@ class SourceManager: ObservableObject {
                 guard let self = self else { return }
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
-                self.latestBuffers[key] = (pixelBuffer, pts)
-                if self.encodeScheduled[key] != true {
-                    self.encodeScheduled[key] = true
-                    encodeQueue.async { [weak self] in
-                        self?.encodeLatest(key: key, encoder: encoder)
-                    }
-                }
+                self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
                 os_unfair_lock_lock(&self.counterLock)
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
                 os_unfair_lock_unlock(&self.counterLock)
