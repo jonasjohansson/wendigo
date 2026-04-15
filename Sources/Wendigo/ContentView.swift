@@ -1,6 +1,6 @@
 import SwiftUI
 
-let kBuildVersion = 4
+let kBuildVersion = 5
 
 struct ContentView: View {
     @ObservedObject var sourceManager: SourceManager
@@ -121,6 +121,7 @@ struct ContentView: View {
                 .padding(.horizontal)
 
                 VStack(alignment: .leading, spacing: 4) {
+                    let hasActive = sourceManager.mappings.contains { $0.isActive }
                     HStack {
                         Text("Bitrate")
                             .font(.caption)
@@ -133,6 +134,7 @@ struct ContentView: View {
                             Text("50").tag(50)
                         }
                         .pickerStyle(.segmented)
+                        .disabled(hasActive)
                         Text("Mbps")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -148,6 +150,12 @@ struct ContentView: View {
                             Text("5s").tag(300)
                         }
                         .pickerStyle(.segmented)
+                        .disabled(hasActive)
+                    }
+                    if hasActive {
+                        Text("Remove streams to change encoding settings")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -175,6 +183,15 @@ struct ContentView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(isPreview ? .orange : .accentColor)
+                                Button(mapping.isActive ? "Stop" : "Start") {
+                                    if mapping.isActive {
+                                        sourceManager.stopMapping(mapping)
+                                    } else {
+                                        sourceManager.startMapping(mapping)
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(mapping.isActive ? .orange : .green)
                                 Button("Remove") {
                                     sourceManager.removeMapping(mapping)
                                 }

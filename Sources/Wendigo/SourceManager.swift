@@ -71,13 +71,9 @@ class SourceManager: ObservableObject {
     @Published var syphonSources: [SyphonSourceInfo] = []
     @Published var mappings: [StreamMapping] = []
 
-    // Encoding settings (applied to all encoders)
-    @Published var bitrateMbps: Int = 30 {
-        didSet { applyEncodingSettings() }
-    }
-    @Published var keyframeInterval: Int = 1 {
-        didSet { applyEncodingSettings() }
-    }
+    // Encoding settings (applied when streams are started)
+    @Published var bitrateMbps: Int = 30
+    @Published var keyframeInterval: Int = 1
 
     // Preview
     @Published var previewMappingId: UUID?
@@ -139,7 +135,6 @@ class SourceManager: ObservableObject {
             isActive: false
         )
         mappings.append(mapping)
-        startMapping(mapping)
         saveMappings()
     }
 
@@ -534,9 +529,9 @@ class SourceManager: ObservableObject {
             let saved = try JSONDecoder().decode([StreamMapping].self, from: data)
             for mapping in saved {
                 mappings.append(mapping)
-                startMapping(mapping)
+                // Don't auto-start — user adds streams manually
             }
-            logger.info("Restored \(saved.count) mapping(s)")
+            logger.info("Restored \(saved.count) mapping(s) (not started)")
         } catch {
             logger.error("Failed to load mappings: \(error)")
         }
