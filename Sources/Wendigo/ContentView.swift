@@ -1,5 +1,7 @@
 import SwiftUI
 
+let kBuildVersion = 2
+
 struct ContentView: View {
     @ObservedObject var sourceManager: SourceManager
     @State private var showTestConfig = false
@@ -244,6 +246,7 @@ struct ContentView: View {
             .frame(minWidth: 300)
         }
         .frame(minWidth: 600, minHeight: 400)
+        .navigationTitle("Wendigo (build \(kBuildVersion))")
         .onAppear {
             sourceManager.startDiscovery()
             try? sourceManager.server.start()

@@ -217,7 +217,7 @@ class SourceManager: ObservableObject {
                 server.disconnectClients(streamId: mapping.streamId)
             }
         }
-        logger.info("Encoding settings updated: \(bitrateMbps) Mbps, keyframe every \(keyframeInterval) frames")
+        logger.info("Encoding settings updated: \(self.bitrateMbps) Mbps, keyframe every \(self.keyframeInterval) frames")
     }
 
     func removeMapping(_ mapping: StreamMapping) {
