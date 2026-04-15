@@ -21,6 +21,11 @@ class StreamEncoder {
     var currentResolution: String {
         currentWidth > 0 ? "\(currentWidth)x\(currentHeight)" : ""
     }
+    /// Keyframe interval: 1 = all-intra (no stutter, higher bandwidth), higher = periodic keyframes
+    var keyframeInterval: Int = 1
+    /// Bitrate in Mbps at 1080p — scales with resolution
+    var bitrateMbps: Int = 30
+
     private var framesSinceLastInput: Int = 0
     private var forceNextKeyframe = false
 
@@ -76,14 +81,13 @@ class StreamEncoder {
         // Low-latency real-time H.264 encoding
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 300 as CFNumber)
-        // Scale bitrate with pixel count (5 Mbps baseline at 1080p — keeps GPU load manageable with multiple streams)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: keyframeInterval as CFNumber)
         let pixels = Double(width) * Double(height)
-        let bitrate = Int(5_000_000 * (pixels / (1920.0 * 1080.0)))
+        let bitrate = Int(Double(bitrateMbps) * 1_000_000 * (pixels / (1920.0 * 1080.0)))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
-        // Cap peak bitrate to 2x average over 1 second — prevents keyframe spikes
+        // Cap peak bitrate to 2x average over 1 second
         let maxBytesPerSecond = (bitrate * 2) / 8
-        let dataRateLimits: [Int] = [maxBytesPerSecond, 1]  // [bytes, seconds]
+        let dataRateLimits: [Int] = [maxBytesPerSecond, 1]
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
                              value: dataRateLimits as CFArray)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,

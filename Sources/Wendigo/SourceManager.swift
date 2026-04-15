@@ -71,6 +71,14 @@ class SourceManager: ObservableObject {
     @Published var syphonSources: [SyphonSourceInfo] = []
     @Published var mappings: [StreamMapping] = []
 
+    // Encoding settings (applied to all encoders)
+    @Published var bitrateMbps: Int = 30 {
+        didSet { applyEncodingSettings() }
+    }
+    @Published var keyframeInterval: Int = 1 {
+        didSet { applyEncodingSettings() }
+    }
+
     // Preview
     @Published var previewMappingId: UUID?
     @Published var previewImage: NSImage?
@@ -184,6 +192,34 @@ class SourceManager: ObservableObject {
         logger.info("Stream ID changed: \(oldId) -> \(trimmed)")
     }
 
+    /// Push current encoding settings to all active encoders (forces session recreation)
+    private func applyEncodingSettings() {
+        for (key, encoder) in encoders {
+            encoder.keyframeInterval = keyframeInterval
+            encoder.bitrateMbps = bitrateMbps
+            // Force session recreation on next frame by resetting dimensions
+            encoder.stop()
+        }
+        // Reconnect all active mappings to pick up new settings
+        for mapping in mappings where mapping.isActive {
+            let key = mapping.id.uuidString
+            if encoders[key] != nil {
+                let encoder = StreamEncoder()
+        encoder.keyframeInterval = keyframeInterval
+        encoder.bitrateMbps = bitrateMbps
+                encoder.keyframeInterval = keyframeInterval
+                encoder.bitrateMbps = bitrateMbps
+                encoder.onEncodedFrame = { [weak self] type, timestamp, data in
+                    self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
+                }
+                encoders[key] = encoder
+                server.clearStreamCache(streamId: mapping.streamId)
+                server.disconnectClients(streamId: mapping.streamId)
+            }
+        }
+        logger.info("Encoding settings updated: \(bitrateMbps) Mbps, keyframe every \(keyframeInterval) frames")
+    }
+
     func removeMapping(_ mapping: StreamMapping) {
         stopMapping(mapping)
         mappings.removeAll { $0.id == mapping.id }
@@ -196,6 +232,8 @@ class SourceManager: ObservableObject {
 
         // Create encoder (session is lazily created on first frame to match input resolution)
         let encoder = StreamEncoder()
+        encoder.keyframeInterval = keyframeInterval
+        encoder.bitrateMbps = bitrateMbps
         encoder.onEncodedFrame = { [weak self] type, timestamp, data in
             self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
         }
@@ -385,6 +423,8 @@ class SourceManager: ObservableObject {
         let key = mapping.id.uuidString
 
         let encoder = StreamEncoder()
+        encoder.keyframeInterval = keyframeInterval
+        encoder.bitrateMbps = bitrateMbps
         encoder.onEncodedFrame = { [weak self] type, timestamp, data in
             self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
         }

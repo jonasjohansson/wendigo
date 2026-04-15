@@ -179,6 +179,40 @@ struct ContentView: View {
                     }
                 }
 
+                // Encoding settings
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Encoding").font(.headline)
+                    HStack {
+                        Text("Bitrate:")
+                            .frame(width: 70, alignment: .leading)
+                        Picker("", selection: $sourceManager.bitrateMbps) {
+                            Text("5 Mbps").tag(5)
+                            Text("10 Mbps").tag(10)
+                            Text("20 Mbps").tag(20)
+                            Text("30 Mbps").tag(30)
+                            Text("50 Mbps").tag(50)
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    HStack {
+                        Text("Keyframe:")
+                            .frame(width: 70, alignment: .leading)
+                        Picker("", selection: $sourceManager.keyframeInterval) {
+                            Text("Every frame").tag(1)
+                            Text("Every 1s").tag(60)
+                            Text("Every 2s").tag(120)
+                            Text("Every 5s").tag(300)
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    Text("All-intra (every frame) = no stutter, higher bandwidth. Longer intervals = lower bandwidth, may stutter on keyframes.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+
                 // Preview pane
                 if sourceManager.previewMappingId != nil {
                     Divider()
