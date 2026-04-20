@@ -33,8 +33,9 @@ class WebSocketServer: ObservableObject {
         let sourceType: String
     }
 
-    func start(port: UInt16 = 9000) throws {
-        let params = NWParameters(tls: nil)
+    func start(port: UInt16 = 8443, tls: TLSConfig? = nil) throws {
+        let tlsOptions = tls.flatMap { TLSSupport.makeTLSOptions(from: $0) }
+        let params = NWParameters(tls: tlsOptions)
         let wsOptions = NWProtocolWebSocket.Options()
         // Increase WebSocket message size limit for large keyframes
         wsOptions.maximumMessageSize = 16 * 1024 * 1024  // 16MB
@@ -42,10 +43,11 @@ class WebSocketServer: ObservableObject {
 
         listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
 
+        let scheme = tlsOptions != nil ? "wss" : "ws"
         listener?.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                logger.info("WebSocket server ready on port \(port)")
+                logger.info("WebSocket server ready: \(scheme, privacy: .public)://<host>:\(port)")
             case .failed(let error):
                 logger.error("WebSocket server failed: \(error)")
             default:
@@ -272,7 +274,6 @@ class WebSocketServer: ObservableObject {
             return
         }
 
-        var hasPending = false
         for connection in clients {
             let connId = ObjectIdentifier(connection)
             guard connection.state == .ready else { continue }
@@ -281,7 +282,6 @@ class WebSocketServer: ObservableObject {
                 continue
             }
             pendingSendCounts[connId] = pending + 1
-            hasPending = true
             sendFrame(to: connection, frame: frame, connId: connId)
         }
 

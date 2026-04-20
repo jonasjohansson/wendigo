@@ -14,5 +14,11 @@ struct WendigoApp: App {
                     NSApp.activate(ignoringOtherApps: true)
                 }
         }
+
+        Settings {
+            SettingsView(sourceManager: sourceManager)
+                .preferredColorScheme(.dark)
+                .frame(minWidth: 480, idealWidth: 520, minHeight: 520)
+        }
     }
 }

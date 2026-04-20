@@ -10,6 +10,10 @@ struct ContentView: View {
     @State private var testCustomW = "1920"
     @State private var testCustomH = "1080"
     @State private var testUseCustom = false
+    @AppStorage("wendigo.useTLS") private var useTLS = false
+    @AppStorage("wendigo.port") private var port: Int = 8443
+    @AppStorage("wendigo.tunnelHostname") private var tunnelHostname: String = ""
+    @State private var tlsAvailable: Bool = FileManager.default.fileExists(atPath: TLSSupport.defaultIdentityURL.path)
 
     var body: some View {
         HSplitView {
@@ -108,58 +112,29 @@ struct ContentView: View {
             }
             .frame(minWidth: 280)
 
-            // Streams + Preview panel
+            // Streams panel
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text("Streams")
                         .font(.headline)
                     Spacer()
-                    Text("ws://\(getLocalIP()):9000")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("\(useTLS ? "wss" : "ws")://\(getLocalIP()):\(String(port))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        if !tunnelHostname.isEmpty {
+                            Text("wss://\(tunnelHostname)")
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                                .textSelection(.enabled)
+                        }
+                    }
                 }
                 .padding(.horizontal)
+                .padding(.top, 8)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    let hasActive = sourceManager.mappings.contains { $0.isActive }
-                    HStack {
-                        Text("Bitrate")
-                            .font(.caption)
-                            .frame(width: 55, alignment: .leading)
-                        Picker("", selection: $sourceManager.bitrateMbps) {
-                            Text("5").tag(5)
-                            Text("10").tag(10)
-                            Text("20").tag(20)
-                            Text("30").tag(30)
-                            Text("50").tag(50)
-                        }
-                        .pickerStyle(.segmented)
-                        .disabled(hasActive)
-                        Text("Mbps")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Keyframe")
-                            .font(.caption)
-                            .frame(width: 55, alignment: .leading)
-                        Picker("", selection: $sourceManager.keyframeInterval) {
-                            Text("All").tag(1)
-                            Text("1s").tag(60)
-                            Text("2s").tag(120)
-                            Text("5s").tag(300)
-                        }
-                        .pickerStyle(.segmented)
-                        .disabled(hasActive)
-                    }
-                    if hasActive {
-                        Text("Remove streams to change encoding settings")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                Divider().padding(.top, 6)
 
                 List {
                     ForEach(sourceManager.mappings) { mapping in
@@ -200,7 +175,7 @@ struct ContentView: View {
                             }
 
                             HStack {
-                                Text("ws://\(getLocalIP()):9000")
+                                Text("\(useTLS ? "wss" : "ws")://\(getLocalIP()):\(String(port))")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 Text("ID:")
@@ -266,7 +241,22 @@ struct ContentView: View {
         .navigationTitle("Wendigo (build \(kBuildVersion))")
         .onAppear {
             sourceManager.startDiscovery()
-            try? sourceManager.server.start()
+            restartServer()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .wendigoRestartServer)) { _ in
+            restartServer()
+        }
+    }
+
+    private func restartServer() {
+        sourceManager.server.stop()
+        // Re-check the cert (user may have just generated one via Settings).
+        tlsAvailable = FileManager.default.fileExists(atPath: TLSSupport.defaultIdentityURL.path)
+        let tls = (useTLS && tlsAvailable) ? TLSSupport.loadConfigIfAvailable() : nil
+        do {
+            try sourceManager.server.start(port: UInt16(max(1024, min(65535, port))), tls: tls)
+        } catch {
+            print("Failed to start WS server: \(error)")
         }
     }
 }
