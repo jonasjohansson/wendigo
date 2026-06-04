@@ -40,6 +40,10 @@ class SyphonFrameReceiver {
     private var poolWidth: Int = 0
     private var poolHeight: Int = 0
 
+    // Reusable GPU->CPU staging buffer, kept across frames to avoid per-frame allocation.
+    private var reusableStagingBuffer: MTLBuffer?
+    private var stagingLength: Int = 0
+
     var onPixelBuffer: ((CVPixelBuffer) -> Void)?
 
     init?(device: MTLDevice? = nil) {
@@ -89,7 +93,10 @@ class SyphonFrameReceiver {
                 kCVPixelBufferHeightKey as String: height,
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             ]
-            CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &pixelBufferPool)
+            let poolAttrs: [String: Any] = [
+                kCVPixelBufferPoolMinimumBufferCountKey as String: 6
+            ]
+            CVPixelBufferPoolCreate(nil, poolAttrs as CFDictionary, attrs as CFDictionary, &pixelBufferPool)
             poolWidth = width
             poolHeight = height
             logger.info("Syphon pool recreated: \(width)x\(height)")
@@ -101,40 +108,45 @@ class SyphonFrameReceiver {
         CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
         guard let pb = pixelBuffer else { return }
 
-        CVPixelBufferLockBaseAddress(pb, [])
-        let dest = CVPixelBufferGetBaseAddress(pb)!
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pb)
-
-        // Use a staging buffer + blit encoder for pipelined GPU-to-CPU copy
         let rowBytes = width * 4
         let bufferLength = rowBytes * height
-        guard let stagingBuffer = device.makeBuffer(length: bufferLength, options: .storageModeShared),
-              let commandBuffer = commandQueue.makeCommandBuffer(),
-              let blit = commandBuffer.makeBlitCommandEncoder() else {
-            CVPixelBufferUnlockBaseAddress(pb, [])
-            return
-        }
 
-        let sourceSize = MTLSize(width: width, height: height, depth: 1)
+        // Reuse one staging buffer across frames. Allocating a fresh 33MB Metal
+        // buffer every frame (per the old code) was ~5GB/s of allocation churn
+        // with five 4K sources.
+        if reusableStagingBuffer == nil || stagingLength != bufferLength {
+            reusableStagingBuffer = device.makeBuffer(length: bufferLength, options: .storageModeShared)
+            stagingLength = bufferLength
+        }
+        guard let staging = reusableStagingBuffer,
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+
         blit.copy(from: texture, sourceSlice: 0, sourceLevel: 0,
-                  sourceOrigin: MTLOrigin(), sourceSize: sourceSize,
-                  to: stagingBuffer, destinationOffset: 0,
+                  sourceOrigin: MTLOrigin(), sourceSize: MTLSize(width: width, height: height, depth: 1),
+                  to: staging, destinationOffset: 0,
                   destinationBytesPerRow: rowBytes, destinationBytesPerImage: bufferLength)
         blit.endEncoding()
-
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            // Copy from staging buffer into CVPixelBuffer
-            let src = stagingBuffer.contents()
-            for row in 0..<height {
-                let dstRow = dest.advanced(by: row * bytesPerRow)
-                let srcRow = src.advanced(by: row * rowBytes)
-                memcpy(dstRow, srcRow, rowBytes)
-            }
-            CVPixelBufferUnlockBaseAddress(pb, [])
-            self?.onPixelBuffer?(pb)
-        }
-
+        // Synchronous: the single reused staging buffer must not be overwritten by
+        // the next frame mid-copy. The blit is just a memcpy on the GPU (sub-ms).
         commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        CVPixelBufferLockBaseAddress(pb, [])
+        if let dest = CVPixelBufferGetBaseAddress(pb) {
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pb)
+            let src = staging.contents()
+            if bytesPerRow == rowBytes {
+                // One contiguous copy instead of one memcpy per row (2160 calls at 4K).
+                memcpy(dest, src, bufferLength)
+            } else {
+                for row in 0..<height {
+                    memcpy(dest.advanced(by: row * bytesPerRow), src.advanced(by: row * rowBytes), rowBytes)
+                }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pb, [])
+        onPixelBuffer?(pb)
     }
 
     func disconnect() {

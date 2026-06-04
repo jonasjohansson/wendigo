@@ -8,11 +8,15 @@ private let logger = Logger(subsystem: "wendigo", category: "Encoder")
 class StreamEncoder {
     private var session: VTCompressionSession?
     private var retainedSelf: Unmanaged<StreamEncoder>?  // prevents dangling pointer in VT callback
+    private var vps: Data?  // HEVC only
     private var sps: Data?
     private var pps: Data?
 
+    /// true = HEVC/H.265 (Safari only, decodes >4096 wide), false = H.264 (universal, ≤4096 wide).
+    var useHEVC: Bool = false
+
     /// Called with encoded NALU data: (type, timestamp_us, data)
-    /// type: 0x00 = SPS/PPS config, 0x01 = keyframe, 0x02 = delta
+    /// type: 0x00 = parameter-set config, 0x01 = keyframe, 0x02 = delta
     var onEncodedFrame: ((UInt8, UInt64, Data) -> Void)?
 
     private(set) var currentWidth: Int32 = 0
@@ -21,8 +25,9 @@ class StreamEncoder {
     var currentResolution: String {
         currentWidth > 0 ? "\(currentWidth)x\(currentHeight)" : ""
     }
-    /// Keyframe interval: 1 = all-intra (no stutter, higher bandwidth), higher = periodic keyframes
-    var keyframeInterval: Int = 1
+    /// Keyframe interval: 1 = all-intra (no stutter, huge bandwidth), higher = periodic keyframes.
+    /// Default 60 (≈1 keyframe/sec at 60fps); all-intra at multi-stream 4K is the dominant cost.
+    var keyframeInterval: Int = 60
     /// Bitrate in Mbps at 1080p — scales with resolution
     var bitrateMbps: Int = 30
 
@@ -46,6 +51,7 @@ class StreamEncoder {
 
         currentWidth = width
         currentHeight = height
+        vps = nil
         sps = nil
         pps = nil
 
@@ -63,7 +69,7 @@ class StreamEncoder {
             allocator: nil,
             width: width,
             height: height,
-            codecType: kCMVideoCodecType_H264,
+            codecType: useHEVC ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
             encoderSpecification: nil,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
@@ -76,7 +82,8 @@ class StreamEncoder {
             logger.error("Failed to create H.264 session: \(status)")
             return false
         }
-        logger.info("H.264 encoder created: \(width)x\(height)")
+        let codecName = useHEVC ? "HEVC" : "H.264"
+        logger.info("\(codecName, privacy: .public) encoder created: \(width)x\(height)")
 
         // Low-latency real-time H.264 encoding
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
@@ -91,7 +98,7 @@ class StreamEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
                              value: dataRateLimits as CFArray)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
-                             value: kVTProfileLevel_H264_High_AutoLevel)
+                             value: useHEVC ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel)
 
         status = VTCompressionSessionPrepareToEncodeFrames(session)
         return status == noErr
@@ -154,6 +161,14 @@ class StreamEncoder {
     }
 
     private func extractParameterSets(_ formatDesc: CMFormatDescription) {
+        if useHEVC {
+            extractHEVCParameterSets(formatDesc)
+        } else {
+            extractH264ParameterSets(formatDesc)
+        }
+    }
+
+    private func extractH264ParameterSets(_ formatDesc: CMFormatDescription) {
         // H.264 has 2 parameter sets: SPS (index 0), PPS (index 1)
         var spsSize = 0, spsCount = 0
         var ppsSize = 0, ppsCount = 0
@@ -171,37 +186,74 @@ class StreamEncoder {
             parameterSetCountOut: &ppsCount, nalUnitHeaderLengthOut: nil
         )
 
-        if let spsPtr = spsPtr, let ppsPtr = ppsPtr {
-            let newSps = Data(bytes: spsPtr, count: spsSize)
-            let newPps = Data(bytes: ppsPtr, count: ppsSize)
+        guard let spsPtr = spsPtr, let ppsPtr = ppsPtr else { return }
+        let newSps = Data(bytes: spsPtr, count: spsSize)
+        let newPps = Data(bytes: ppsPtr, count: ppsSize)
 
-            // Only send if changed
-            if newSps != sps || newPps != pps {
-                sps = newSps
-                pps = newPps
-                // Pack SPS + PPS: [spsLen(4)] [sps] [ppsLen(4)] [pps]
-                var configData = Data()
-                var sLen = UInt32(spsSize).bigEndian
-                var pLen = UInt32(ppsSize).bigEndian
-                configData.append(Data(bytes: &sLen, count: 4))
-                configData.append(newSps)
-                configData.append(Data(bytes: &pLen, count: 4))
-                configData.append(newPps)
-                onEncodedFrame?(0x00, 0, configData)
-            }
+        // Only send if changed. Wire format: [spsLen(4)][sps][ppsLen(4)][pps]
+        if newSps != sps || newPps != pps {
+            sps = newSps
+            pps = newPps
+            onEncodedFrame?(0x00, 0, packConfig([newSps, newPps]))
         }
     }
 
+    private func extractHEVCParameterSets(_ formatDesc: CMFormatDescription) {
+        // HEVC has 3 parameter sets: VPS (0), SPS (1), PPS (2)
+        var vpsSize = 0, vpsCount = 0, spsSize = 0, spsCount = 0, ppsSize = 0, ppsCount = 0
+        var vpsPtr: UnsafePointer<UInt8>?
+        var spsPtr: UnsafePointer<UInt8>?
+        var ppsPtr: UnsafePointer<UInt8>?
+
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            formatDesc, parameterSetIndex: 0,
+            parameterSetPointerOut: &vpsPtr, parameterSetSizeOut: &vpsSize,
+            parameterSetCountOut: &vpsCount, nalUnitHeaderLengthOut: nil
+        )
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            formatDesc, parameterSetIndex: 1,
+            parameterSetPointerOut: &spsPtr, parameterSetSizeOut: &spsSize,
+            parameterSetCountOut: &spsCount, nalUnitHeaderLengthOut: nil
+        )
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            formatDesc, parameterSetIndex: 2,
+            parameterSetPointerOut: &ppsPtr, parameterSetSizeOut: &ppsSize,
+            parameterSetCountOut: &ppsCount, nalUnitHeaderLengthOut: nil
+        )
+
+        guard let vpsPtr = vpsPtr, let spsPtr = spsPtr, let ppsPtr = ppsPtr else { return }
+        let newVps = Data(bytes: vpsPtr, count: vpsSize)
+        let newSps = Data(bytes: spsPtr, count: spsSize)
+        let newPps = Data(bytes: ppsPtr, count: ppsSize)
+
+        // VPS-first ordering is how the browser auto-detects HEVC.
+        // Wire format: [vpsLen(4)][vps][spsLen(4)][sps][ppsLen(4)][pps]
+        if newVps != vps || newSps != sps || newPps != pps {
+            vps = newVps
+            sps = newSps
+            pps = newPps
+            onEncodedFrame?(0x00, 0, packConfig([newVps, newSps, newPps]))
+        }
+    }
+
+    /// Pack parameter sets, each as [len(4, big-endian)][nalu].
+    private func packConfig(_ nalus: [Data]) -> Data {
+        var data = Data()
+        for nalu in nalus {
+            var len = UInt32(nalu.count).bigEndian
+            data.append(Data(bytes: &len, count: 4))
+            data.append(nalu)
+        }
+        return data
+    }
+
     var latestConfig: Data? {
+        if useHEVC {
+            guard let vps = vps, let sps = sps, let pps = pps else { return nil }
+            return packConfig([vps, sps, pps])
+        }
         guard let sps = sps, let pps = pps else { return nil }
-        var configData = Data()
-        var sLen = UInt32(sps.count).bigEndian
-        var pLen = UInt32(pps.count).bigEndian
-        configData.append(Data(bytes: &sLen, count: 4))
-        configData.append(sps)
-        configData.append(Data(bytes: &pLen, count: 4))
-        configData.append(pps)
-        return configData
+        return packConfig([sps, pps])
     }
 
     func stop() {
