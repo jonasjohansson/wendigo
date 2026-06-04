@@ -73,7 +73,9 @@ class SourceManager: ObservableObject {
 
     // Encoding settings (applied when streams are started)
     @Published var bitrateMbps: Int = 30
-    @Published var keyframeInterval: Int = 1
+    @Published var keyframeInterval: Int = 60
+    /// HEVC decodes >4096 wide but is Safari-only on the client; H.264 is universal but caps ~4096 wide.
+    @Published var useHEVC: Bool = false
 
     // Preview
     @Published var previewMappingId: UUID?
@@ -198,6 +200,7 @@ class SourceManager: ObservableObject {
         for (_, encoder) in encoders {
             encoder.keyframeInterval = self.keyframeInterval
             encoder.bitrateMbps = self.bitrateMbps
+            encoder.useHEVC = self.useHEVC
             encoder.stop()  // session recreates on next incoming frame
         }
         // Clear cached config/keyframes so clients get fresh ones
@@ -221,6 +224,7 @@ class SourceManager: ObservableObject {
         let encoder = StreamEncoder()
         encoder.keyframeInterval = keyframeInterval
         encoder.bitrateMbps = bitrateMbps
+        encoder.useHEVC = useHEVC
         encoder.onEncodedFrame = { [weak self] type, timestamp, data in
             self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
         }
@@ -251,7 +255,7 @@ class SourceManager: ObservableObject {
 
         // Create receiver — only keep the latest frame, encode on a separate queue
         let frameCount = OSAllocatedUnfairLock(initialState: UInt64(0))
-        let encodeQueue = DispatchQueue(label: "wendigo.encode.\(key)", qos: .userInteractive)
+        let encodeQueue = DispatchQueue(label: "wendigo.encode.\(key)", qos: .userInitiated)
         switch mapping.source {
         case .ndi(let ndiSource):
             let receiver = NDIFrameReceiver()
@@ -328,30 +332,21 @@ class SourceManager: ObservableObject {
         }
     }
 
-    /// Encode only the latest frame for a mapping, then check for a newer one
+    /// Encode the latest frame for a mapping, draining newer frames that arrive
+    /// while encoding. Iterative (not recursive) so a source that outpaces the
+    /// encoder can't grow the stack unbounded.
     private func encodeLatest(key: String, encoder: StreamEncoder?) {
-        os_unfair_lock_lock(&encodeLock)
-        guard let (buffer, pts) = latestBuffers[key] else {
-            encodeScheduled[key] = false
-            os_unfair_lock_unlock(&encodeLock)
-            return
-        }
-        latestBuffers.removeValue(forKey: key)
-        os_unfair_lock_unlock(&encodeLock)
-
-        encoder?.encode(buffer, timestamp: pts)
-
-        // Check if a newer frame arrived while we were encoding
-        os_unfair_lock_lock(&encodeLock)
-        let hasNext = latestBuffers[key] != nil
-        os_unfair_lock_unlock(&encodeLock)
-
-        if hasNext {
-            encodeLatest(key: key, encoder: encoder)
-        } else {
+        while true {
             os_unfair_lock_lock(&encodeLock)
-            encodeScheduled[key] = false
+            guard let (buffer, pts) = latestBuffers[key] else {
+                encodeScheduled[key] = false
+                os_unfair_lock_unlock(&encodeLock)
+                return
+            }
+            latestBuffers.removeValue(forKey: key)
             os_unfair_lock_unlock(&encodeLock)
+
+            encoder?.encode(buffer, timestamp: pts)
         }
     }
 
@@ -452,6 +447,7 @@ class SourceManager: ObservableObject {
         let encoder = StreamEncoder()
         encoder.keyframeInterval = keyframeInterval
         encoder.bitrateMbps = bitrateMbps
+        encoder.useHEVC = useHEVC
         encoder.onEncodedFrame = { [weak self] type, timestamp, data in
             self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
         }
@@ -459,7 +455,7 @@ class SourceManager: ObservableObject {
 
         let frameCount = OSAllocatedUnfairLock(initialState: UInt64(0))
         let mappingId = mapping.id
-        let encodeQueue = DispatchQueue(label: "wendigo.encode.\(key)", qos: .userInteractive)
+        let encodeQueue = DispatchQueue(label: "wendigo.encode.\(key)", qos: .userInitiated)
 
         switch mapping.source {
         case .ndi(let ndiSource):
@@ -533,6 +529,7 @@ class SourceManager: ObservableObject {
         guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
         let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
         let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
 
         guard let context = CGContext(
             data: baseAddress,
@@ -541,12 +538,35 @@ class SourceManager: ObservableObject {
             bitsPerComponent: 8,
             bytesPerRow: bytesPerRow,
             space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            bitmapInfo: bitmapInfo
         ), let cgImage = context.makeImage() else { return }
 
-        let image = NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+        // Downscale before publishing — handing SwiftUI a full 4K NSImage to redraw
+        // every update is far more expensive than the stream itself.
+        let maxDim: CGFloat = 480
+        let scale = min(1, maxDim / CGFloat(max(width, height)))
+        let outImage: NSImage
+        if scale < 1,
+           let dst = CGContext(data: nil,
+                               width: max(1, Int(CGFloat(width) * scale)),
+                               height: max(1, Int(CGFloat(height) * scale)),
+                               bitsPerComponent: 8,
+                               bytesPerRow: 0,
+                               space: colorSpace,
+                               bitmapInfo: bitmapInfo) {
+            dst.interpolationQuality = .low
+            dst.draw(cgImage, in: CGRect(x: 0, y: 0, width: dst.width, height: dst.height))
+            if let scaled = dst.makeImage() {
+                outImage = NSImage(cgImage: scaled, size: NSSize(width: dst.width, height: dst.height))
+            } else {
+                outImage = NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+            }
+        } else {
+            outImage = NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+        }
+
         DispatchQueue.main.async {
-            self.previewImage = image
+            self.previewImage = outImage
             self.previewResolution = resolution
         }
     }

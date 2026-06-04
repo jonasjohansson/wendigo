@@ -66,6 +66,21 @@ struct SettingsView: View {
                     .frame(maxWidth: 240)
                     .disabled(hasActive)
                 }
+                HStack {
+                    Text("Codec")
+                    Spacer()
+                    Picker("", selection: $sourceManager.useHEVC) {
+                        Text("H.264").tag(false)
+                        Text("HEVC").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 240)
+                    .disabled(hasActive)
+                }
+                Text(sourceManager.useHEVC
+                     ? "HEVC: decodes wider than 4096px, but only in Safari."
+                     : "H.264: plays everywhere, but the browser can't decode beyond ~4096px wide.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if hasActive {
                     Text("Remove streams to change encoding settings")
                         .font(.caption).foregroundStyle(.secondary)

@@ -143,7 +143,11 @@ class NDIFrameReceiver {
                             kCVPixelBufferHeightKey as String: height,
                             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                         ]
-                        CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &self.pixelBufferPool)
+                        // Pre-size the pool so bursts don't allocate buffers on the receive thread.
+                        let poolAttrs: [String: Any] = [
+                            kCVPixelBufferPoolMinimumBufferCountKey as String: 6
+                        ]
+                        CVPixelBufferPoolCreate(nil, poolAttrs as CFDictionary, attrs as CFDictionary, &self.pixelBufferPool)
                         self.poolWidth = width
                         self.poolHeight = height
                         logger.info("NDI pool recreated: \(width)x\(height)")
