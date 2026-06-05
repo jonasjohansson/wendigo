@@ -118,6 +118,12 @@ struct ContentView: View {
                     Text("Streams")
                         .font(.headline)
                     Spacer()
+                    if !sourceManager.mappings.isEmpty {
+                        Button("Start All") { sourceManager.startAll() }
+                            .controlSize(.small)
+                        Button("Stop All") { sourceManager.stopAllStreams() }
+                            .controlSize(.small)
+                    }
                     VStack(alignment: .trailing, spacing: 2) {
                         Text("\(useTLS ? "wss" : "ws")://\(getLocalIP()):\(String(port))")
                             .font(.caption)

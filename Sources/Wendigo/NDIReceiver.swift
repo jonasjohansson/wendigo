@@ -71,7 +71,7 @@ class NDIFrameReceiver {
         settings.source_to_connect_to = ndiSource
         settings.color_format = NDIlib_recv_color_format_BGRX_BGRA
         settings.bandwidth = NDIlib_recv_bandwidth_highest
-        settings.allow_video_fields = true
+        settings.allow_video_fields = false  // de-interlace to progressive; avoids encoding half-height fields
         settings.p_ndi_recv_name = recvName.utf8String
 
         recvInstance = NDIlib_recv_create_v3(&settings)

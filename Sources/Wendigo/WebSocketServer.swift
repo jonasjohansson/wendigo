@@ -235,29 +235,32 @@ class WebSocketServer: ObservableObject {
     /// Broadcast encoded frame to all clients on a stream.
     /// Only the latest frame per stream is kept — older frames are overwritten, not queued.
     func broadcast(streamId: String, type: UInt8, timestamp: UInt64, data: Data) {
-        // Cache for late-joining clients (lock-free, called from encode queue)
-        if type == 0x00 {
-            queue.async { [weak self] in self?.latestConfig[streamId] = data }
-        } else if type == 0x01 {
-            queue.async { [weak self] in self?.latestKeyframe[streamId] = (timestamp, data) }
-        }
-
-        // Build the wire frame
-        var frame = Data(capacity: 9 + data.count)
-        frame.append(type)
-        var ts = timestamp.bigEndian
-        frame.append(Data(bytes: &ts, count: 8))
-        frame.append(data)
-
-        // Store latest frame and schedule a single send — overwrites any pending old frame
         queue.async { [weak self] in
             guard let self = self else { return }
-            self.pendingFrames[streamId] = frame
 
-            // Only schedule one send per stream at a time
+            // Always cache config/keyframe so a late-joining client can start cleanly.
+            if type == 0x00 {
+                self.latestConfig[streamId] = data
+            } else if type == 0x01 {
+                self.latestKeyframe[streamId] = (timestamp, data)
+            }
+
+            // No clients on this stream? Do nothing else. Framing and then freeing
+            // multi-MB frames for zero clients saturates this serial queue and
+            // starves new connections' handshakes (which then time out as "lost").
+            guard let clients = self.connections[streamId], !clients.isEmpty else { return }
+
+            // Build the wire frame: [type(1)][timestamp(8, big-endian)][payload]
+            var frame = Data(capacity: 9 + data.count)
+            frame.append(type)
+            var ts = timestamp.bigEndian
+            frame.append(Data(bytes: &ts, count: 8))
+            frame.append(data)
+
+            // Keep only the newest frame; overwrite any unsent one.
+            self.pendingFrames[streamId] = frame
             if self.sendScheduled[streamId] == true { return }
             self.sendScheduled[streamId] = true
-
             self.sendPendingFrame(streamId: streamId)
         }
     }

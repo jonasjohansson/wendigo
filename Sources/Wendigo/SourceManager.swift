@@ -72,10 +72,16 @@ class SourceManager: ObservableObject {
     @Published var mappings: [StreamMapping] = []
 
     // Encoding settings (applied when streams are started)
-    @Published var bitrateMbps: Int = 30
-    @Published var keyframeInterval: Int = 60
+    @Published var bitrateMbps: Int = UserDefaults.standard.object(forKey: "wendigo.bitrate") as? Int ?? 30 {
+        didSet { UserDefaults.standard.set(bitrateMbps, forKey: "wendigo.bitrate") }
+    }
+    @Published var keyframeInterval: Int = UserDefaults.standard.object(forKey: "wendigo.keyframe") as? Int ?? 60 {
+        didSet { UserDefaults.standard.set(keyframeInterval, forKey: "wendigo.keyframe") }
+    }
     /// HEVC decodes >4096 wide but is Safari-only on the client; H.264 is universal but caps ~4096 wide.
-    @Published var useHEVC: Bool = false
+    @Published var useHEVC: Bool = UserDefaults.standard.object(forKey: "wendigo.useHEVC") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(useHEVC, forKey: "wendigo.useHEVC") }
+    }
 
     // Preview
     @Published var previewMappingId: UUID?
@@ -163,12 +169,11 @@ class SourceManager: ObservableObject {
         }
 
         // Lowercase, replace spaces/special chars with hyphens, collapse multiples
+        // Replace every run of non-alphanumerics with a single hyphen, then trim,
+        // e.g. "Arena - FRONT_LongWallA" → "arena-front-longwalla".
         return name
             .lowercased()
-            .replacingOccurrences(of: " - ", with: "-")
-            .replacingOccurrences(of: " ", with: "-")
-            .replacingOccurrences(of: "[^a-z0-9\\-]", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "-{2,}", with: "-", options: .regularExpression)
+            .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
@@ -392,6 +397,20 @@ class SourceManager: ObservableObject {
         server.clearStreamCache(streamId: mapping.streamId)
         updateServerStreams()
         logger.info("Stopped mapping: \(mapping.source.name) -> \(mapping.streamId)")
+    }
+
+    /// Start every saved stream that isn't already running.
+    func startAll() {
+        for mapping in mappings where !mapping.isActive {
+            startMapping(mapping)
+        }
+    }
+
+    /// Stop every running stream, leaving the server and discovery running.
+    func stopAllStreams() {
+        for mapping in mappings where mapping.isActive {
+            stopMapping(mapping)
+        }
     }
 
     func stopAll() {
