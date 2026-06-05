@@ -7,6 +7,7 @@ private let logger = Logger(subsystem: "wendigo", category: "WebSocket")
 class WebSocketServer: ObservableObject {
     private var listener: NWListener?
     @Published var clientCounts: [String: Int] = [:]  // streamId -> count
+    @Published var serverError: String?               // surfaced in the UI on start/listener failure
 
     private var connections: [String: [NWConnection]] = [:]  // streamId -> connections
     private var pendingSendCounts: [ObjectIdentifier: Int] = [:]  // per-connection pending sends
@@ -44,12 +45,16 @@ class WebSocketServer: ObservableObject {
         listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
 
         let scheme = tlsOptions != nil ? "wss" : "ws"
-        listener?.stateUpdateHandler = { state in
+        listener?.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:
                 logger.info("WebSocket server ready: \(scheme, privacy: .public)://<host>:\(port)")
+                DispatchQueue.main.async { self?.serverError = nil }
             case .failed(let error):
                 logger.error("WebSocket server failed: \(error)")
+                DispatchQueue.main.async {
+                    self?.serverError = "Server failed on port \(port): \(error.localizedDescription)"
+                }
             default:
                 break
             }

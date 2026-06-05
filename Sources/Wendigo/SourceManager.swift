@@ -82,6 +82,10 @@ class SourceManager: ObservableObject {
     @Published var useHEVC: Bool = UserDefaults.standard.object(forKey: "wendigo.useHEVC") as? Bool ?? false {
         didSet { UserDefaults.standard.set(useHEVC, forKey: "wendigo.useHEVC") }
     }
+    /// Downscale sources wider than this before encoding. 0 = source resolution.
+    @Published var maxOutputWidth: Int = UserDefaults.standard.object(forKey: "wendigo.maxWidth") as? Int ?? 0 {
+        didSet { UserDefaults.standard.set(maxOutputWidth, forKey: "wendigo.maxWidth") }
+    }
 
     // Preview
     @Published var previewMappingId: UUID?
@@ -206,6 +210,7 @@ class SourceManager: ObservableObject {
             encoder.keyframeInterval = self.keyframeInterval
             encoder.bitrateMbps = self.bitrateMbps
             encoder.useHEVC = self.useHEVC
+            encoder.maxOutputWidth = self.maxOutputWidth
             encoder.stop()  // session recreates on next incoming frame
         }
         // Clear cached config/keyframes so clients get fresh ones
@@ -230,6 +235,7 @@ class SourceManager: ObservableObject {
         encoder.keyframeInterval = keyframeInterval
         encoder.bitrateMbps = bitrateMbps
         encoder.useHEVC = useHEVC
+        encoder.maxOutputWidth = maxOutputWidth
         encoder.onEncodedFrame = { [weak self] type, timestamp, data in
             self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
         }
@@ -467,6 +473,7 @@ class SourceManager: ObservableObject {
         encoder.keyframeInterval = keyframeInterval
         encoder.bitrateMbps = bitrateMbps
         encoder.useHEVC = useHEVC
+        encoder.maxOutputWidth = maxOutputWidth
         encoder.onEncodedFrame = { [weak self] type, timestamp, data in
             self?.server.broadcast(streamId: mapping.streamId, type: type, timestamp: timestamp, data: data)
         }

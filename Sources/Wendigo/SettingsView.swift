@@ -81,6 +81,22 @@ struct SettingsView: View {
                      ? "HEVC: decodes wider than 4096px, but only in Safari."
                      : "H.264: plays everywhere, but the browser can't decode beyond ~4096px wide.")
                     .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text("Max width")
+                    Spacer()
+                    Picker("", selection: $sourceManager.maxOutputWidth) {
+                        Text("Source").tag(0)
+                        Text("4096").tag(4096)
+                        Text("2560").tag(2560)
+                        Text("1920").tag(1920)
+                        Text("1280").tag(1280)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 320)
+                    .disabled(hasActive)
+                }
+                Text("Downscale wider sources before encoding (keeps aspect). ≤4096 lets H.264 / Chrome handle huge walls; lower = less CPU + bandwidth.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if hasActive {
                     Text("Remove streams to change encoding settings")
                         .font(.caption).foregroundStyle(.secondary)

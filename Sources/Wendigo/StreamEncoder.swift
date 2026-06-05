@@ -35,6 +35,10 @@ class StreamEncoder {
     /// VTCompressionSession (and leaking it) after teardown.
     private var stopped = false
 
+    /// Downscale source frames wider than this before encoding. 0 = source resolution.
+    var maxOutputWidth: Int = 0
+    private let scaler = FrameScaler()
+
     private var framesSinceLastInput: Int = 0
     private var forceNextKeyframe = false
 
@@ -117,8 +121,10 @@ class StreamEncoder {
 
     func encode(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime) {
         if stopped { return }
-        let width = Int32(CVPixelBufferGetWidth(pixelBuffer))
-        let height = Int32(CVPixelBufferGetHeight(pixelBuffer))
+        // Optional downscale (Settings → Max width). 0 = encode at source resolution.
+        let input = maxOutputWidth > 0 ? scaler.scaled(pixelBuffer, maxWidth: maxOutputWidth) : pixelBuffer
+        let width = Int32(CVPixelBufferGetWidth(input))
+        let height = Int32(CVPixelBufferGetHeight(input))
         guard ensureSession(width: width, height: height), let session = session else { return }
 
         var frameProps: CFDictionary? = nil
@@ -129,7 +135,7 @@ class StreamEncoder {
 
         VTCompressionSessionEncodeFrame(
             session,
-            imageBuffer: pixelBuffer,
+            imageBuffer: input,
             presentationTimeStamp: timestamp,
             duration: .invalid,
             frameProperties: frameProps,

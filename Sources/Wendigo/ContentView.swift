@@ -135,6 +135,11 @@ struct ContentView: View {
                                 .foregroundStyle(.blue)
                                 .textSelection(.enabled)
                         }
+                        if let err = sourceManager.server.serverError {
+                            Text(err)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
                     }
                 }
                 .padding(.horizontal)
@@ -259,10 +264,12 @@ struct ContentView: View {
         // Re-check the cert (user may have just generated one via Settings).
         tlsAvailable = FileManager.default.fileExists(atPath: TLSSupport.defaultIdentityURL.path)
         let tls = (useTLS && tlsAvailable) ? TLSSupport.loadConfigIfAvailable() : nil
+        sourceManager.server.serverError = nil
         do {
             try sourceManager.server.start(port: UInt16(max(1024, min(65535, port))), tls: tls)
         } catch {
             print("Failed to start WS server: \(error)")
+            sourceManager.server.serverError = "Couldn’t start on port \(port): \(error.localizedDescription)"
         }
     }
 }
