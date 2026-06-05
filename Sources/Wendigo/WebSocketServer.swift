@@ -228,12 +228,24 @@ class WebSocketServer: ObservableObject {
         timer.resume()
     }
 
-    // Per-stream latest frame — only the newest frame is sent, preventing queue buildup
-    private var pendingFrames: [String: Data] = [:]
+    // Per-stream send state (touched only on `queue`).
+    // Config (0x00) and keyframes (0x01) go in a reliable FIFO and are NEVER dropped —
+    // dropping one corrupts every client until the next keyframe. Deltas (0x02) coalesce
+    // to the latest, since a missed delta is recovered by the following frame.
+    private var reliableQueue: [String: [Data]] = [:]
+    private var pendingDelta: [String: Data] = [:]
     private var sendScheduled: [String: Bool] = [:]
 
-    /// Broadcast encoded frame to all clients on a stream.
-    /// Only the latest frame per stream is kept — older frames are overwritten, not queued.
+    /// Build the wire frame: [type(1)][timestamp(8, big-endian)][payload].
+    private func makeFrame(type: UInt8, timestamp: UInt64, data: Data) -> Data {
+        var frame = Data(capacity: 9 + data.count)
+        frame.append(type)
+        withUnsafeBytes(of: timestamp.bigEndian) { frame.append(contentsOf: $0) }
+        frame.append(data)
+        return frame
+    }
+
+    /// Broadcast an encoded frame to all clients on a stream.
     func broadcast(streamId: String, type: UInt8, timestamp: UInt64, data: Data) {
         queue.async { [weak self] in
             guard let self = self else { return }
@@ -246,33 +258,46 @@ class WebSocketServer: ObservableObject {
             }
 
             // No clients on this stream? Do nothing else. Framing and then freeing
-            // multi-MB frames for zero clients saturates this serial queue and
-            // starves new connections' handshakes (which then time out as "lost").
+            // multi-MB frames for zero clients saturates this queue and starves
+            // new connections' handshakes (which then time out as "lost").
             guard let clients = self.connections[streamId], !clients.isEmpty else { return }
 
-            // Build the wire frame: [type(1)][timestamp(8, big-endian)][payload]
-            var frame = Data(capacity: 9 + data.count)
-            frame.append(type)
-            var ts = timestamp.bigEndian
-            frame.append(Data(bytes: &ts, count: 8))
-            frame.append(data)
+            let frame = self.makeFrame(type: type, timestamp: timestamp, data: data)
+            if type == 0x02 {
+                self.pendingDelta[streamId] = frame                    // coalesce: keep latest
+            } else {
+                self.reliableQueue[streamId, default: []].append(frame) // never dropped
+            }
 
-            // Keep only the newest frame; overwrite any unsent one.
-            self.pendingFrames[streamId] = frame
-            if self.sendScheduled[streamId] == true { return }
-            self.sendScheduled[streamId] = true
-            self.sendPendingFrame(streamId: streamId)
+            if self.sendScheduled[streamId] != true {
+                self.sendScheduled[streamId] = true
+                self.drainStream(streamId)
+            }
         }
     }
 
-    private func sendPendingFrame(streamId: String) {
-        guard let frame = pendingFrames[streamId] else {
+    /// Send the next queued frame for a stream, then reschedule until drained.
+    /// Reliable frames (config/keyframe) go to every ready client and bypass
+    /// backpressure; deltas respect per-connection backpressure and may be skipped.
+    private func drainStream(_ streamId: String) {
+        let frame: Data
+        let reliable: Bool
+        if var rq = reliableQueue[streamId], !rq.isEmpty {
+            frame = rq.removeFirst()
+            reliableQueue[streamId] = rq.isEmpty ? nil : rq
+            reliable = true
+        } else if let delta = pendingDelta[streamId] {
+            frame = delta
+            pendingDelta[streamId] = nil
+            reliable = false
+        } else {
             sendScheduled[streamId] = false
             return
         }
-        pendingFrames.removeValue(forKey: streamId)
 
         guard let clients = connections[streamId], !clients.isEmpty else {
+            reliableQueue[streamId] = nil
+            pendingDelta[streamId] = nil
             sendScheduled[streamId] = false
             return
         }
@@ -280,36 +305,22 @@ class WebSocketServer: ObservableObject {
         for connection in clients {
             let connId = ObjectIdentifier(connection)
             guard connection.state == .ready else { continue }
-            let pending = pendingSendCounts[connId, default: 0]
-            if pending >= maxPendingSends {
-                continue
+            if !reliable && pendingSendCounts[connId, default: 0] >= maxPendingSends {
+                continue  // slow client: drop this delta; it recovers on the next frame
             }
-            pendingSendCounts[connId] = pending + 1
+            pendingSendCounts[connId, default: 0] += 1
             sendFrame(to: connection, frame: frame, connId: connId)
         }
 
-        // Check for next frame after a short delay to coalesce
-        queue.asyncAfter(deadline: .now() + 0.001) { [weak self] in
-            guard let self = self else { return }
-            if self.pendingFrames[streamId] != nil {
-                self.sendPendingFrame(streamId: streamId)
-            } else {
-                self.sendScheduled[streamId] = false
-            }
-        }
+        // Keep draining (new deltas coalesce into pendingDelta between hops).
+        queue.async { [weak self] in self?.drainStream(streamId) }
     }
 
     /// Send a single frame to a specific connection (used for initial config/keyframe on join)
     private func sendInitialFrame(to connection: NWConnection, type: UInt8, timestamp: UInt64, data: Data) {
-        var frame = Data(capacity: 9 + data.count)
-        frame.append(type)
-        var ts = timestamp.bigEndian
-        frame.append(Data(bytes: &ts, count: 8))
-        frame.append(data)
-
         let connId = ObjectIdentifier(connection)
         pendingSendCounts[connId] = (pendingSendCounts[connId] ?? 0) + 1
-        sendFrame(to: connection, frame: frame, connId: connId)
+        sendFrame(to: connection, frame: makeFrame(type: type, timestamp: timestamp, data: data), connId: connId)
     }
 
     private func sendFrame(to connection: NWConnection, frame: Data, connId: ObjectIdentifier) {
