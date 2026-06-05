@@ -136,13 +136,13 @@ class SyphonFrameReceiver {
         if let dest = CVPixelBufferGetBaseAddress(pb) {
             let bytesPerRow = CVPixelBufferGetBytesPerRow(pb)
             let src = staging.contents()
-            if bytesPerRow == rowBytes {
-                // One contiguous copy instead of one memcpy per row (2160 calls at 4K).
-                memcpy(dest, src, bufferLength)
-            } else {
-                for row in 0..<height {
-                    memcpy(dest.advanced(by: row * bytesPerRow), src.advanced(by: row * rowBytes), rowBytes)
-                }
+            // Syphon uses a bottom-left (GL) origin; flip vertically into the
+            // top-left CVPixelBuffer so the encoded frame isn't upside down.
+            // Same bytes moved as a straight copy, just reversed row order.
+            for row in 0..<height {
+                let srcRow = src.advanced(by: row * rowBytes)
+                let dstRow = dest.advanced(by: (height - 1 - row) * bytesPerRow)
+                memcpy(dstRow, srcRow, rowBytes)
             }
         }
         CVPixelBufferUnlockBaseAddress(pb, [])

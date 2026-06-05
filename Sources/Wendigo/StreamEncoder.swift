@@ -31,6 +31,10 @@ class StreamEncoder {
     /// Bitrate in Mbps at 1080p — scales with resolution
     var bitrateMbps: Int = 30
 
+    /// Set by stop(); prevents a late in-flight frame from resurrecting a new
+    /// VTCompressionSession (and leaking it) after teardown.
+    private var stopped = false
+
     private var framesSinceLastInput: Int = 0
     private var forceNextKeyframe = false
 
@@ -89,8 +93,12 @@ class StreamEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: keyframeInterval as CFNumber)
+        // Bitrate need grows sub-linearly with resolution; HEVC needs ~0.6× of H.264
+        // for equal quality. Linear scaling gave ~480 Mbps at 8K, which is wasteful.
         let pixels = Double(width) * Double(height)
-        let bitrate = Int(Double(bitrateMbps) * 1_000_000 * (pixels / (1920.0 * 1080.0)))
+        let resScale = pow(pixels / (1920.0 * 1080.0), 0.75)
+        let codecFactor = useHEVC ? 0.6 : 1.0
+        let bitrate = Int(Double(bitrateMbps) * 1_000_000 * resScale * codecFactor)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
         // Cap peak bitrate to 2x average over 1 second
         let maxBytesPerSecond = (bitrate * 2) / 8
@@ -99,12 +107,16 @@ class StreamEncoder {
                              value: dataRateLimits as CFArray)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
                              value: useHEVC ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel)
+        // Help rate control plan ahead, and emit frames with no reordering delay (low latency).
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
 
         status = VTCompressionSessionPrepareToEncodeFrames(session)
         return status == noErr
     }
 
     func encode(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime) {
+        if stopped { return }
         let width = Int32(CVPixelBufferGetWidth(pixelBuffer))
         let height = Int32(CVPixelBufferGetHeight(pixelBuffer))
         guard ensureSession(width: width, height: height), let session = session else { return }
@@ -257,6 +269,7 @@ class StreamEncoder {
     }
 
     func stop() {
+        stopped = true
         if let session = session {
             VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(session)

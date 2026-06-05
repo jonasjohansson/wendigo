@@ -72,10 +72,16 @@ class SourceManager: ObservableObject {
     @Published var mappings: [StreamMapping] = []
 
     // Encoding settings (applied when streams are started)
-    @Published var bitrateMbps: Int = 30
-    @Published var keyframeInterval: Int = 60
+    @Published var bitrateMbps: Int = UserDefaults.standard.object(forKey: "wendigo.bitrate") as? Int ?? 30 {
+        didSet { UserDefaults.standard.set(bitrateMbps, forKey: "wendigo.bitrate") }
+    }
+    @Published var keyframeInterval: Int = UserDefaults.standard.object(forKey: "wendigo.keyframe") as? Int ?? 60 {
+        didSet { UserDefaults.standard.set(keyframeInterval, forKey: "wendigo.keyframe") }
+    }
     /// HEVC decodes >4096 wide but is Safari-only on the client; H.264 is universal but caps ~4096 wide.
-    @Published var useHEVC: Bool = false
+    @Published var useHEVC: Bool = UserDefaults.standard.object(forKey: "wendigo.useHEVC") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(useHEVC, forKey: "wendigo.useHEVC") }
+    }
 
     // Preview
     @Published var previewMappingId: UUID?
@@ -94,13 +100,13 @@ class SourceManager: ObservableObject {
     private var receivers: [String: Any] = [:]       // mapping.id -> receiver
     private var encoders: [String: StreamEncoder] = [:] // mapping.id -> encoder
     private var frameCounters: [String: Int] = [:]
-    private var counterLock = os_unfair_lock()
+    private let counterLock = OSAllocatedUnfairLock()
     private var frameTimers: [String: Timer] = [:]
     private var reconnectTimers: [String: Timer] = [:]
     /// Per-mapping latest pixel buffer — only the newest is encoded, preventing queue buildup
     private var latestBuffers: [String: (CVPixelBuffer, CMTime)] = [:]
     private var encodeScheduled: [String: Bool] = [:]
-    private var encodeLock = os_unfair_lock()
+    private let encodeLock = OSAllocatedUnfairLock()
     private let reconnectDelay: TimeInterval = 3.0
 
     // Persistence
@@ -163,12 +169,11 @@ class SourceManager: ObservableObject {
         }
 
         // Lowercase, replace spaces/special chars with hyphens, collapse multiples
+        // Replace every run of non-alphanumerics with a single hyphen, then trim,
+        // e.g. "Arena - FRONT_LongWallA" → "arena-front-longwalla".
         return name
             .lowercased()
-            .replacingOccurrences(of: " - ", with: "-")
-            .replacingOccurrences(of: " ", with: "-")
-            .replacingOccurrences(of: "[^a-z0-9\\-]", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "-{2,}", with: "-", options: .regularExpression)
+            .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
@@ -231,15 +236,15 @@ class SourceManager: ObservableObject {
         encoders[key] = encoder
 
         // Track FPS
-        os_unfair_lock_lock(&counterLock)
+        counterLock.lock()
         frameCounters[key] = 0
-        os_unfair_lock_unlock(&counterLock)
+        counterLock.unlock()
         frameTimers[key] = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self, let idx = self.mappings.firstIndex(where: { $0.id == mapping.id }) else { return }
-            os_unfair_lock_lock(&self.counterLock)
+            self.counterLock.lock()
             let count = self.frameCounters[key] ?? 0
             self.frameCounters[key] = 0
-            os_unfair_lock_unlock(&self.counterLock)
+            self.counterLock.unlock()
             let newFps = Double(count)
             if self.mappings[idx].fps != newFps {
                 self.mappings[idx].fps = newFps
@@ -266,9 +271,9 @@ class SourceManager: ObservableObject {
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
                 // Store latest buffer — overwrites any unprocessed frame
                 self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
-                os_unfair_lock_lock(&self.counterLock)
+                self.counterLock.lock()
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
-                os_unfair_lock_unlock(&self.counterLock)
+                self.counterLock.unlock()
                 self.capturePreviewIfNeeded(mappingId: mappingId, pixelBuffer: pixelBuffer)
             }
             receiver.onSourceStalled = { [weak self] in
@@ -288,9 +293,9 @@ class SourceManager: ObservableObject {
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
                 self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
-                os_unfair_lock_lock(&self.counterLock)
+                self.counterLock.lock()
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
-                os_unfair_lock_unlock(&self.counterLock)
+                self.counterLock.unlock()
                 self.capturePreviewIfNeeded(mappingId: mappingId, pixelBuffer: pixelBuffer)
             }
             receiver.connect(to: syphonSource)
@@ -304,9 +309,9 @@ class SourceManager: ObservableObject {
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
                 self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
-                os_unfair_lock_lock(&self.counterLock)
+                self.counterLock.lock()
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
-                os_unfair_lock_unlock(&self.counterLock)
+                self.counterLock.unlock()
                 self.capturePreviewIfNeeded(mappingId: mappingId, pixelBuffer: pixelBuffer)
             }
             receiver.start()
@@ -320,11 +325,11 @@ class SourceManager: ObservableObject {
 
     /// Store a pixel buffer and schedule encoding if not already scheduled
     private func storeAndScheduleEncode(key: String, buffer: CVPixelBuffer, pts: CMTime, encoder: StreamEncoder?, encodeQueue: DispatchQueue) {
-        os_unfair_lock_lock(&encodeLock)
+        encodeLock.lock()
         latestBuffers[key] = (buffer, pts)
         let needsSchedule = encodeScheduled[key] != true
         if needsSchedule { encodeScheduled[key] = true }
-        os_unfair_lock_unlock(&encodeLock)
+        encodeLock.unlock()
         if needsSchedule {
             encodeQueue.async { [weak self] in
                 self?.encodeLatest(key: key, encoder: encoder)
@@ -337,14 +342,14 @@ class SourceManager: ObservableObject {
     /// encoder can't grow the stack unbounded.
     private func encodeLatest(key: String, encoder: StreamEncoder?) {
         while true {
-            os_unfair_lock_lock(&encodeLock)
+            encodeLock.lock()
             guard let (buffer, pts) = latestBuffers[key] else {
                 encodeScheduled[key] = false
-                os_unfair_lock_unlock(&encodeLock)
+                encodeLock.unlock()
                 return
             }
             latestBuffers.removeValue(forKey: key)
-            os_unfair_lock_unlock(&encodeLock)
+            encodeLock.unlock()
 
             encoder?.encode(buffer, timestamp: pts)
         }
@@ -379,9 +384,9 @@ class SourceManager: ObservableObject {
 
         frameTimers[key]?.invalidate()
         frameTimers.removeValue(forKey: key)
-        os_unfair_lock_lock(&counterLock)
+        counterLock.lock()
         frameCounters.removeValue(forKey: key)
-        os_unfair_lock_unlock(&counterLock)
+        counterLock.unlock()
 
         mappings[idx].isActive = false
         if previewMappingId == mapping.id {
@@ -392,6 +397,20 @@ class SourceManager: ObservableObject {
         server.clearStreamCache(streamId: mapping.streamId)
         updateServerStreams()
         logger.info("Stopped mapping: \(mapping.source.name) -> \(mapping.streamId)")
+    }
+
+    /// Start every saved stream that isn't already running.
+    func startAll() {
+        for mapping in mappings where !mapping.isActive {
+            startMapping(mapping)
+        }
+    }
+
+    /// Stop every running stream, leaving the server and discovery running.
+    func stopAllStreams() {
+        for mapping in mappings where mapping.isActive {
+            stopMapping(mapping)
+        }
     }
 
     func stopAll() {
@@ -465,9 +484,9 @@ class SourceManager: ObservableObject {
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
                 self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
-                os_unfair_lock_lock(&self.counterLock)
+                self.counterLock.lock()
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
-                os_unfair_lock_unlock(&self.counterLock)
+                self.counterLock.unlock()
                 self.capturePreviewIfNeeded(mappingId: mappingId, pixelBuffer: pixelBuffer)
             }
             receiver.onSourceStalled = { [weak self] in
@@ -486,9 +505,9 @@ class SourceManager: ObservableObject {
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
                 self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
-                os_unfair_lock_lock(&self.counterLock)
+                self.counterLock.lock()
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
-                os_unfair_lock_unlock(&self.counterLock)
+                self.counterLock.unlock()
                 self.capturePreviewIfNeeded(mappingId: mappingId, pixelBuffer: pixelBuffer)
             }
             receiver.connect(to: syphonSource)
@@ -501,9 +520,9 @@ class SourceManager: ObservableObject {
                 let count = frameCount.withLock { val -> UInt64 in let c = val; val += 1; return c }
                 let pts = CMTime(value: CMTimeValue(count), timescale: 60)
                 self.storeAndScheduleEncode(key: key, buffer: pixelBuffer, pts: pts, encoder: encoder, encodeQueue: encodeQueue)
-                os_unfair_lock_lock(&self.counterLock)
+                self.counterLock.lock()
                 self.frameCounters[key] = (self.frameCounters[key] ?? 0) + 1
-                os_unfair_lock_unlock(&self.counterLock)
+                self.counterLock.unlock()
                 self.capturePreviewIfNeeded(mappingId: mappingId, pixelBuffer: pixelBuffer)
             }
             receiver.start()
